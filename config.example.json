@@ -1,0 +1,47 @@
+{
+  "lane_x0": 0.12437810945273632,
+  "lane_x1": 0.87893864013267,
+  "scan_y": 0.5339435545385202,
+  "scan_h": 0.009153318077803204,
+  "drum_red": [
+    0.809,
+    0.802
+  ],
+  "drum_blue": [
+    0.185,
+    0.802
+  ],
+  "red": {
+    "h_lo": 150,
+    "h_hi": 9,
+    "s_min": 110,
+    "v_min": 90,
+    "wrap": true
+  },
+  "blue": {
+    "h_lo": 88,
+    "h_hi": 118,
+    "s_min": 90,
+    "v_min": 90,
+    "wrap": false
+  },
+  "step": 3,
+  "thresh_red": 10,
+  "thresh_blue": 10,
+  "hysteresis": 0.6,
+  "refractory_ms": 55.0,
+  "tap_hold_ms": 12.0,
+  "inter_tap_ms": 6.0,
+  "tap_order": [
+    "red",
+    "blue"
+  ],
+  "window_rect": [
+    100,
+    120,
+    420,
+    910
+  ],
+  "backend": "mss",
+  "target_fps": 240
+}
