@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from .color import ZoneReader
+from .color import ZoneReader  # normalises counts to the reference screen
 from .config import Config
 from .scanner import ZoneScanner
 

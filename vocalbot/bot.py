@@ -33,7 +33,7 @@ class Bot:
                     break
 
                 by_rect = {
-                    rect: classify(px, self.lut, self.cfg.step)
+                    rect: classify(px, self.lut, self.cfg.step, self.capture.norm)
                     for rect, px in self.capture.grab_zones().items()
                 }
                 counts = fan_out(by_rect, self.capture.rect_groups)

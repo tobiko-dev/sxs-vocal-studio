@@ -215,17 +215,33 @@ def test_zones_are_evaluated_highest_priority_first():
 # geometry and config
 
 
-def test_rects_are_scale_invariant():
-    """The whole point of fractional geometry: a resized mirror window needs no
-    recalibration."""
+def test_counts_are_resolution_invariant():
+    """One set of thresholds must work at any mirror window size.
+
+    Raw pixel counts scale with area, so a half-size window would quarter every
+    count and silently fall under the thresholds. Counts are normalised to the
+    reference screen, so the same note reads the same at any scale.
+    """
     cfg = Config()
     img = load("frame_t53_both.png")
     native = sample_counts(cfg, img)
-    half = sample_counts(cfg, cv2.resize(img, (603, 1311)))
-    for name in native:
-        n, h = native[name][0], half[name][0]
-        if n > 100:  # only meaningful where there is real signal
-            assert abs(h * 4 - n) < 0.45 * n, f"{name}: {n} native vs {h} at half scale"
+    for w, h in ((603, 1311), (616, 1336), (402, 874)):  # half, the recording, a third
+        scaled = sample_counts(cfg, cv2.resize(img, (w, h)))
+        for name in native:
+            n, s = native[name][0], scaled[name][0]
+            if n > 100:  # only meaningful where there is real signal
+                assert abs(s - n) < 0.30 * n, f"{name} at {w}x{h}: {n} native vs {s}"
+
+
+def test_thresholds_still_pass_at_recording_resolution():
+    """The reference frames must resolve identically when downscaled to the size
+    a real mirror window records at."""
+    cfg = front_config()
+    for name, expected in CASES:
+        small = cv2.resize(load(name), (616, 1336))
+        scanner = ZoneScanner(cfg)
+        fires = scanner.update(sample_counts(cfg, small), t=0.0)
+        assert scanner.taps_for(fires) == expected, f"{name} at 616x1336"
 
 
 def test_zone_reader_origin_matches_full_frame_slice():

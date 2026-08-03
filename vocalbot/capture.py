@@ -116,6 +116,11 @@ class ZoneCapture:
         self.cfg = cfg
         self.mode = cfg.capture_mode
         wx, wy, ww, wh = cfg._require_window()
+        # Counts are normalised to the reference screen so one set of thresholds
+        # survives any mirror window size.
+        from .color import normalizer
+
+        self.norm = normalizer(ww, wh)
         # Keyed by rect, not by zone: the lane strip backs three zones and is
         # only worth grabbing once.
         self.rect_groups = cfg.rect_groups()

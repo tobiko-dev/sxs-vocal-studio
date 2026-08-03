@@ -35,8 +35,24 @@ def build_lut(cfg) -> np.ndarray:
     return lut
 
 
-def classify(region_bgr: np.ndarray, lut: np.ndarray, step: int = 3) -> tuple[int, int]:
-    """Count red and blue glyph pixels in a BGR region.
+def normalizer(screen_w: int, screen_h: int) -> float:
+    """Scale factor putting counts on the reference screen's footing.
+
+    Pixel counts scale with area, so the same note yields ~4x fewer pixels in a
+    616x1336 mirror window than on the 1206x2622 phone. Without this, thresholds
+    would only be valid at the resolution they were measured at and would fail
+    silently whenever the window was resized. Normalising here means one set of
+    thresholds works at any window size.
+    """
+    from .config import REF_H, REF_W
+
+    return (REF_W * REF_H) / float(max(1, screen_w) * max(1, screen_h))
+
+
+def classify(
+    region_bgr: np.ndarray, lut: np.ndarray, step: int = 3, norm: float = 1.0
+) -> tuple[int, int]:
+    """Count red and blue glyph pixels in a BGR region, normalised by `norm`.
 
     Subsamples by `step` in both axes first. Notes are large blobs, so throwing
     away 8 of every 9 pixels costs nothing in separability but cuts the work by
@@ -52,7 +68,10 @@ def classify(region_bgr: np.ndarray, lut: np.ndarray, step: int = 3) -> tuple[in
     idx = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)
     counts = np.bincount(lut[idx].ravel(), minlength=4)
     # bit 0 = red, bit 1 = blue; value 3 means both gates matched one pixel.
-    return int(counts[1] + counts[3]), int(counts[2] + counts[3])
+    return (
+        int((counts[1] + counts[3]) * norm),
+        int((counts[2] + counts[3]) * norm),
+    )
 
 
 def fan_out(by_rect: dict, rect_groups: dict) -> dict[str, tuple[int, int]]:
@@ -74,6 +93,7 @@ class ZoneReader:
         self.cfg = cfg
         self.lut = build_lut(cfg)
         self.step = cfg.step
+        self.norm = normalizer(screen_w, screen_h)
         self.rect_groups = cfg.rect_groups()
         ox, oy = origin
         self.slices = {}
@@ -84,7 +104,7 @@ class ZoneReader:
 
     def read(self, frame_bgr: np.ndarray) -> dict[str, tuple[int, int]]:
         by_rect = {
-            rect: classify(frame_bgr[ys, xs], self.lut, self.step)
+            rect: classify(frame_bgr[ys, xs], self.lut, self.step, self.norm)
             for rect, (ys, xs) in self.slices.items()
         }
         return fan_out(by_rect, self.rect_groups)

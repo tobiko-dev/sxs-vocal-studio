@@ -261,7 +261,8 @@ def cmd_probe(args) -> int:
     try:
         while True:
             by_rect = {
-                rect: classify(px, lut, cfg.step) for rect, px in cap.grab_zones().items()
+                rect: classify(px, lut, cfg.step, cap.norm)
+                for rect, px in cap.grab_zones().items()
             }
             counts = fan_out(by_rect, cap.rect_groups)
             fires = scanner.update(counts, time.perf_counter())
