@@ -74,6 +74,25 @@ def classify(
     )
 
 
+def signature(region_bgr: np.ndarray, size: tuple[int, int] = (8, 4)) -> np.ndarray:
+    """A tiny greyscale thumbprint of a region.
+
+    Colour alone can't tell you the queue advanced, because two consecutive
+    notes are often the same colour. This is what distinguishes "still the same
+    note" from "a new note that happens to match" - the glyph shape, the bubble
+    position and the lane differ even when the colour doesn't.
+    """
+    small = cv2.resize(region_bgr, size, interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+
+def sig_diff(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """Mean absolute difference between two signatures, 0-255."""
+    if a is None or b is None:
+        return 255.0
+    return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean())
+
+
 def fan_out(by_rect: dict, rect_groups: dict) -> dict[str, tuple[int, int]]:
     """Spread one count per rect across every zone sharing that rect."""
     return {name: by_rect[rect] for rect, names in rect_groups.items() for name in names}

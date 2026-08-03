@@ -1,75 +1,92 @@
 # sxs-vocal-studio
 
-A zone-based bot for the two-drum rhythm game, driving an iPhone through macOS
+A bot for the two-drum rhythm game, driving an iPhone through macOS
 **iPhone Mirroring**.
 
-The rule it plays by: read the colour of the notes coming down the runway. Red
+The rule it plays by: read the colour of the note at the front of the queue. Red
 means tap the red drum, blue means the blue drum, both at once means both, and
 the mirror ball means blue.
 
 ## How it works
 
-Notes travel down a runway toward two drums. Their **colour**, not their lane
-position, decides which drum to hit — which matters because fever mode collapses
-the two lanes into one centred lane, where a position-based detector would break.
-Fever also tints the whole screen gold, but it does not shift note hue, so one
-set of colour gates covers both modes.
+**The queue is static.** This is the thing that shapes everything else, and it
+isn't obvious from a screenshot. The notes do not scroll toward the drums. The
+front note sits in a fixed slot until it is cleared, then the whole queue shifts
+up by one over a short animation.
 
-Detection is a list of **zones**. A zone is a box, a rule for what counts as a
-hit inside it, and the drums to press. Nothing about the layout is hardcoded —
-move, retune, add or disable zones with `vocalbot calibrate zones` or
-`vocalbot zone set`.
+Measured on a 31-second gameplay recording:
+
+- **90.5% of frames show zero vertical motion.** Nothing is moving.
+- The front note stays pinned at the same position for the entire recording.
+- Advances are discrete 4–8 frame animations at **irregular** intervals — driven
+  by taps, not by a clock.
+
+So there is no arrival to predict, no note velocity, and no lead time to
+compensate for. The bot is a closed loop:
+
+```
+read the front slot → tap the drums it needs → wait for the slot to change → repeat
+```
+
+Waiting for the change is what absorbs mirroring latency. However slow the round
+trip, the bot physically cannot run ahead of the game.
 
 ```
         ┌───────────────────────────────┐
-        │        note runway            │
+        │      the queue (static)       │
         │   ○ blue          ● red       │
-   ═════╪═══ lane box: red / blue / both╪═══
-        │       ● red                   │
-        │        ┌────────┐             │
-        │        │ disco  │             │   <- small box inside the ball's path
-        │        └────────┘             │
+        │   ○ blue          ● red       │
+        │        ┌───────────┐          │
+        │        │front slot │          │  <- the only pixels read
+        │        └───────────┘          │
         │   [blue drum]   [red drum]    │
         └───────────────────────────────┘
 ```
 
-The four default zones, highest priority first:
+### Colour, not position
 
-| zone | box | match | taps | why |
-|---|---|---|---|---|
-| `disco` | small centre box | `blue` ≥ 300 | blue | the mirror ball |
-| `both` | lane strip | `red` **and** `blue` | red + blue | simultaneous notes |
-| `red` | lane strip | `red` | red | |
-| `blue` | lane strip | `blue` | blue | |
+Which drum to press is decided by **colour**, never by lane position. Fever mode
+tints the whole screen gold and, in some sections, rearranges the lanes — a
+position-based detector would break there. Fever does not shift note hue, so one
+set of colour gates covers every mode.
 
-### Priority resolution
+Detection is a list of **zones** sharing that one box. A zone is a box, a rule
+for what counts as a hit inside it, and the drums to press:
 
-Zones overlap on purpose, so a firing zone **claims the drums it taps and
-suppresses lower-priority zones whose taps it already covers**. That's what stops
-`both` from double-tapping alongside the separate `red` and `blue` zones, and
-stops the mirror ball — which also reads as blue in the lane strip — from tapping
-blue twice. A suppressed zone still advances its edge state, so it can't fire
-late on the next frame.
+| zone | match | taps | priority |
+|---|---|---|---|
+| `disco` | `blue` ≥ 1000 | blue | 20 |
+| `both` | `red` **and** `blue` | red + blue | 10 |
+| `red` | `red` | red | 0 |
+| `blue` | `blue` | blue | 0 |
 
-Suppression needs *full* coverage: a zone tapping `red+blue` is not suppressed by
-one that only claims `red`.
+A firing zone claims the drums it taps and suppresses lower-priority zones whose
+drums it already covers, so `both` never stacks with the separate `red` and
+`blue` zones. Suppression needs *full* coverage: a zone tapping `red+blue` isn't
+suppressed by one claiming only `red`.
 
-### Why the lane box sits high
+The mirror ball needs no special case. Under the queue model it simply **is** the
+front note when its turn comes, and it reads as pure blue there (r=0,
+b=1230–2385 in the recording). That's indistinguishable by pixel count from an
+ordinary blue note at 1444–1594, and doesn't need to be — both tap blue. The
+`disco` zone is kept as an explicit, adjustable rule rather than a hidden
+special case, and shares the front box so it costs nothing to capture.
 
-Measured on the reference frames: below about 60% of screen height the frontmost
-note glyphs are large enough to **overlap into one continuous run**, so two
-consecutive same-colour notes merge into a single detection and the bot taps once
-where it should tap twice. Higher up the glyphs separate with clean gaps.
+### Detecting the advance
 
-Placing it high also buys lead time, which is what absorbs mirroring latency. The
-lane box's vertical position is therefore the single latency knob — raise it to
-tap earlier, lower it to tap later.
+Colour cannot tell you the queue moved, because consecutive notes are often the
+same colour. The bot keeps a small greyscale **signature** of the front slot
+instead — the glyph shape, bubble position and lane all differ between notes even
+when the colour doesn't.
 
-The cost is signal strength: a note is ~150–1100 glyph pixels up there versus
-~2500 at the bottom, against a noise floor around 20 — which is why the
-thresholds are low. The disco box is the opposite case: kept small and placed
-inside the ball's path, it reads **1113 blue against at most 2** on every other
-frame. Widening it to cover the ball's full extent drops that margin to 5×.
+A tap fires when the slot has been **still** and its **reading unchanged** for a
+few frames, and the signature differs from the one at the last tap. Both
+conditions are needed: the signature can go quiet while the outgoing note's
+bubble still tints the box, which would otherwise let a transitional reading be
+tapped. Measured frame-to-frame signature differences are cleanly bimodal — 87%
+of frames under 3.0 (settled), 9% over 6.0 (mid-animation).
+
+If the slot hasn't changed after `retry_ms`, the tap was lost and it fires again.
 
 ### Why it's fast
 
@@ -80,16 +97,20 @@ frame. Widening it to cover the ball's full extent drops that margin to 5×.
 
 Four choices get it there:
 
-1. **Only the zones are captured**, never the whole window, and in one grab
-   rather than one per zone. Screen capture dominates the loop.
-2. **No per-frame HSV conversion.** The HSV gates are baked once into a
-   32768-entry lookup table keyed on the top 5 bits of each channel. Per frame
-   it's one gather and one `bincount`.
+1. **Only the front box is captured**, never the whole window, in one grab.
+   Screen capture dominates the loop.
+2. **No per-frame HSV conversion.** The gates are baked once into a 32768-entry
+   lookup table keyed on the top 5 bits of each channel. Per frame it's one
+   gather and one `bincount`.
 3. **Subsampling by 3.** Notes are large blobs; discarding 8 of every 9 pixels
    costs nothing in separability and cuts the work ninefold.
-4. **Deduplication by box.** Three zones share the lane strip, so those pixels
-   are captured and counted once and the result fanned out — half the classify
-   cost on its own.
+4. **Deduplication by box.** All four zones share the front box, so those pixels
+   are captured and counted once and the result fanned out.
+
+Counts are **normalised to a reference resolution**. Raw counts scale with area,
+so the same note giving 40px on the native phone gives ~10px in a 616×1336 mirror
+window — without normalising, thresholds would silently stop firing whenever the
+window was resized. One set of thresholds now holds at any size.
 
 Taps run on a separate thread, so a held tap never blinds the detector.
 
@@ -102,16 +123,15 @@ iPhone Mirroring needs.
 pip install -r requirements.txt
 ```
 
-Grant both permissions in **System Settings → Privacy & Security**, or nothing
-will work:
+Grant both permissions in **System Settings → Privacy & Security**:
 
-- **Screen Recording** — for your terminal, to capture the zones
+- **Screen Recording** — for your terminal, to capture the box
 - **Accessibility** — for your terminal, to post synthetic clicks
 
 Then:
 
 1. Open iPhone Mirroring and **leave the window where it is**. Coordinates are
-   captured relative to a pinned window rect; move it and you must recalibrate.
+   relative to a pinned window rect; move it and you must recalibrate.
 2. Start the song so the playfield is on screen.
 3. Pin the window:
 
@@ -121,12 +141,11 @@ Then:
 
    `--chrome` trims the title bar. The command prints the content aspect ratio —
    it should be close to **0.4600**. A big mismatch means the trim is wrong or
-   the window is letterboxed. Zone rects are fractions of the phone screen, so a
-   uniformly scaled window needs no other changes.
+   the window is letterboxed.
 
-4. Place the zones. The editor is live by default — it re-grabs the window every
-   frame, so you can **drag boxes around while the song is playing** and watch
-   the counts move against real notes:
+4. Place the boxes. The editor is live — it re-grabs every frame, so you can
+   **drag boxes while the song plays** and watch the counts move against real
+   notes:
 
    ```bash
    python -m vocalbot.cli calibrate zones
@@ -136,32 +155,24 @@ Then:
    | | |
    |---|---|
    | drag inside a box | move it |
-   | drag a handle | resize (8 handles: corners and edges) |
+   | drag a handle | resize (8 handles) |
    | `TAB` | select the next zone |
    | arrows | nudge 1px |
    | `[` `]` | shrink / grow around the centre |
-   | `+` `-` | adjust the thresholds this zone actually uses |
+   | `+` `-` | adjust the thresholds this zone uses |
    | `m` / `t` | cycle match rule / tapped drums |
    | `n` / `x` | new zone / delete zone |
    | `e` | enable or disable |
    | `s` / `q` | save / quit |
 
-   The status bar shows the selected zone's live counts against its thresholds
-   and flags unsaved changes. Pass `--image shot.png` to edit against a saved
-   screenshot instead — useful before the Mac side is set up. Both commands write
-   `calibration.png` showing every box with its counts.
+   All four zones share one box, so `TAB` is how you reach the ones underneath.
+   Pass `--image shot.png` to edit against a saved screenshot instead.
 
-   The three lane zones share one box on purpose, so `TAB` is how you reach the
-   one underneath.
-
-5. Check the signal without tapping anything:
+5. Check the signal without tapping:
 
    ```bash
    python -m vocalbot.cli probe
    ```
-
-   Counts should sit near zero between notes and spike as one crosses. A `*`
-   marks a zone that fired.
 
 6. Dry run, then for real:
 
@@ -170,80 +181,67 @@ Then:
    python -m vocalbot.cli run
    ```
 
+## Validating against a recording
+
+```bash
+python -m vocalbot.cli replay gameplay.mp4
+python -m vocalbot.cli replay gameplay.mp4 --overlay annotated.mp4
+```
+
+This runs the exact live decision path over a recording, so a config change can
+be checked in seconds without touching the game. The number to tune against is
+**read consistency** — how steadily the box reports one answer for the whole time
+a note occupies the slot. A box reaching too far up catches the note behind and
+flickers mid-note; the shipped box scores 0.997 on a signature-segmented sweep
+and 0.881 measured between dispatches.
+
+Note that a recording captures a *human* playing, so the pace in it is theirs.
+Replay verifies each note is seen once and read correctly; it cannot measure how
+fast the bot will go, because the queue only advances when someone taps.
+
 ## Editing zones without the GUI
 
 ```bash
 vocalbot zone list                          # boxes, thresholds, priorities
 vocalbot zone list --image shot.png         # what each zone sees in a frame
-vocalbot zone set blue --thresh-blue 45
-vocalbot zone set red --rect 0.12,0.50,0.88,0.515
-vocalbot zone set disco --disable
+vocalbot zone set blue --thresh-blue 250
+vocalbot zone set red --rect 0.25,0.65,0.75,0.70
 vocalbot zone add hold --rect 0.3,0.4,0.7,0.42 --match any --taps red+blue
 vocalbot zone rm hold
 ```
 
-`--match` is one of `red`, `blue`, `both`, `any`. `--taps` is `red`, `blue` or
-`red+blue`. Raise `--priority` to make a zone suppress others.
-
-## Tuning
-
-Three things depend on motion and cannot be read off a still frame: where the
-lane box sits vertically, the pixel thresholds, and the refractory period. Fit
-them from a recording:
-
-```bash
-python -m vocalbot.cli tune song.mov --write
-```
-
-This runs an expensive-but-accurate blob tracker over the full playfield as
-ground truth, then grid-searches the cheap zone detector until it agrees,
-reporting precision and recall. Record 20–30 seconds of one song. The sweep moves
-the `lane` group only — set the disco box with `vocalbot zone set disco`.
-
-Check the loop rate any time:
-
-```bash
-python -m vocalbot.cli bench
-```
-
-`bench` times both capture modes and tells you which is faster. `union` takes one
-grab covering every zone and slices it; `per_zone` takes one grab per box. Union
-wins when the boxes are close together, per_zone when the union is mostly dead
-space — with the default layout only 19% of the union is live pixels, so it's
-worth measuring. Set `capture_mode` in `config.json`.
-
 ## Known gaps
 
+- **Never run live.** Everything is validated against stills and one recording.
+  The round-trip latency, and therefore the real note rate, is unmeasured.
+- **`retry_ms` is a guess.** It must sit above the true round trip or the bot
+  double-taps, and below a stalled note or it hangs. 900ms is conservative;
+  measure it once the bot has run.
 - **No true multi-touch.** macOS has no public multi-touch injection API, so
-  "both drums" is two taps `inter_tap_ms` apart rather than a simultaneous press.
-  Rhythm hit windows are tens of milliseconds wide so this normally lands; widen
-  it first if doubles are dropping.
-- **Note speed is assumed roughly constant.** The lane box is a fixed lead
-  distance, not a velocity model. A chart with large speed changes mid-song would
-  need per-section offsets.
-- **Window must stay pinned.** There's no continuous window tracking; moving or
-  resizing the mirroring window invalidates the calibration.
-- **Only tap notes are modelled.** If any glyph type turns out to be a hold or a
-  flick, it needs a zone with different behaviour than a single tap.
+  "both drums" is two taps `inter_tap_ms` apart. Hit windows are tens of ms wide
+  so this should land; widen it first if doubles drop.
+- **Window must stay pinned.** No continuous window tracking.
 - **The bot doesn't know when to stop.** It has no notion of a pause, countdown
   or results screen and will keep tapping through them.
+- **Only tap notes are modelled.** If any glyph is a hold or a flick, it needs a
+  zone that behaves differently.
 
 ## Layout
 
 ```
 vocalbot/
   config.py     zones, colour gates, geometry as screen fractions
-  color.py      LUT construction, the hot classify path, per-box fan-out
-  scanner.py    per-zone edge state and priority resolution
+  color.py      LUT classify, resolution normalising, slot signatures
+  queuescan.py  advance detection and tap resolution
   capture.py    zone capture (union / per-zone) and mirror-window lookup
   calibrate.py  overlay rendering, count reports, the drum picker
   editor.py     draggable/resizable box editor (logic split from the GUI)
   tap.py        threaded tap dispatch via CGEventPost
   bot.py        the live loop
-  tune.py       offline blob-tracker reference and parameter sweep
-  cli.py        calibrate | zone | bench | probe | tune | run
-tests/          53 tests: detection against the reference frames, editor geometry
-assets/frames/  the reference screenshots, with known-correct answers
+  replay.py     offline replay of the live decision path over a recording
+  cli.py        calibrate | zone | bench | probe | replay | run
+tests/          70 tests: detection, queue scanner, editor geometry
+assets/frames/  reference screenshots with known-correct answers
 ```
 
 ## Note

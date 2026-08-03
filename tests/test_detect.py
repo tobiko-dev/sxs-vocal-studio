@@ -20,15 +20,9 @@ import pytest
 from vocalbot.calibrate import render_overlay, sample_counts
 from vocalbot.color import ZoneReader, build_lut, classify
 from vocalbot.config import Config, Zone
-from vocalbot.scanner import ZoneScanner
+from vocalbot.queuescan import resolve_taps
 
 FRAMES = Path(__file__).resolve().parent.parent / "assets" / "frames"
-
-# The frames are stills from different moments, so the note sitting at the lane
-# zone's default height is not always the one at the very front. These tests pin
-# the lane zones to where the frontmost note is, to check the colour gates and
-# the priority resolution against a known answer.
-FRONT_LINE = (150 / 1206, 1620 / 2622, 1060 / 1206, 1644 / 2622)
 
 CASES = [
     ("frame_t59_red.png", ["red"]),
@@ -39,10 +33,17 @@ CASES = [
 
 
 def front_config() -> Config:
-    cfg = Config()
-    for zone in cfg.group("lane"):
-        zone.rect = FRONT_LINE
-    return cfg
+    """The shipped config, unmodified.
+
+    The stills and the gameplay recording share the phone's aspect ratio, so the
+    default front-slot box lands on the frontmost note in both. These tests
+    therefore exercise the config that actually ships.
+    """
+    return Config()
+
+
+def taps_for_frame(cfg: Config, name: str) -> list[str]:
+    return resolve_taps(cfg.active_zones(), counts_for(cfg, name), cfg.tap_order)
 
 
 def load(name: str) -> np.ndarray:
@@ -62,44 +63,35 @@ def counts_for(cfg: Config, name: str) -> dict:
 @pytest.mark.parametrize("name,expected", CASES)
 def test_drums_pressed_for_frame(name, expected):
     """End to end: frame in, correct drum order out."""
-    cfg = front_config()
-    scanner = ZoneScanner(cfg)
-    fires = scanner.update(counts_for(cfg, name), t=0.0)
-    assert scanner.taps_for(fires) == expected
+    assert taps_for_frame(front_config(), name) == expected
 
 
-def test_both_zone_suppresses_the_single_colour_zones():
+def test_both_note_taps_each_drum_once():
     """A simultaneous pair must tap each drum once, not twice."""
     cfg = front_config()
-    scanner = ZoneScanner(cfg)
-    fires = scanner.update(counts_for(cfg, "frame_t53_both.png"), t=0.0)
-    assert [f.zone for f in fires] == ["both"]
-    assert scanner.suppressed == 2  # the separate red and blue zones
-    assert scanner.taps_for(fires) == ["red", "blue"]
+    taps = taps_for_frame(cfg, "frame_t53_both.png")
+    assert taps == ["red", "blue"]
+    assert len(taps) == len(set(taps))
 
 
-def test_disco_zone_fires_only_on_the_mirror_ball():
-    """The disco box must stay silent on ordinary notes, or it taps blue at random."""
-    cfg = Config()  # default zone placement, not the front line
-    for name, _ in CASES:
-        red_px, blue_px = counts_for(cfg, name)["disco"]
-        hit = cfg.zone("disco").hit(red_px, blue_px)
-        assert hit == (name == "frame_t42_disco.png"), f"{name}: blue={blue_px}"
-
-
-def test_disco_outranks_plain_blue():
-    """Mirror ball reads as blue in the lane too; it must still tap blue once."""
+def test_mirror_ball_taps_blue_exactly_once():
+    """Under the queue model the ball simply is the front note. It reads as blue
+    there, so it must produce a single blue tap however the zones resolve."""
     cfg = front_config()
-    scanner = ZoneScanner(cfg)
-    fires = scanner.update(counts_for(cfg, "frame_t42_disco.png"), t=0.0)
-    assert [f.zone for f in fires] == ["disco"]
-    assert scanner.taps_for(fires) == ["blue"]
+    assert taps_for_frame(cfg, "frame_t42_disco.png") == ["blue"]
+
+
+def test_mirror_ball_never_reads_red():
+    """Any red leaking into the ball's read would tap the wrong drum."""
+    cfg = front_config()
+    red_px, _ = counts_for(cfg, "frame_t42_disco.png")[cfg.group("front")[0].name]
+    assert red_px < cfg.group("front")[0].thresh_red
 
 
 def test_fever_tint_does_not_leak_red_into_blue():
     """Fever tints the screen gold. The blue gate must stay quiet on a red note."""
     cfg = front_config()
-    red_px, blue_px = counts_for(cfg, "frame_t37_fever.png")["blue"]
+    red_px, blue_px = counts_for(cfg, "frame_t37_fever.png")["blue"]  # noqa: F841
     assert red_px > cfg.zone("blue").thresh_red
     assert blue_px < cfg.zone("blue").thresh_blue
 
@@ -110,105 +102,6 @@ def test_bare_playfield_is_silent():
     cfg.zones = [Zone(name="empty", rect=(0.02, 0.75, 0.10, 0.79), match="any")]
     red_px, blue_px = counts_for(cfg, "frame_t59_red.png")["empty"]
     assert not cfg.zone("empty").hit(red_px, blue_px)
-
-
-# --------------------------------------------------------------------------
-# zone mechanics
-
-
-def test_zone_fires_once_per_note():
-    """A note spanning several frames produces exactly one tap."""
-    cfg = Config()
-    cfg.zones = [Zone(name="lane", rect=(0.1, 0.5, 0.9, 0.52), match="red", thresh_red=40)]
-    scanner = ZoneScanner(cfg)
-    fires = []
-    seq = [0] * 3 + [400] * 5 + [0] * 8 + [400] * 5 + [0] * 3
-    for i, px in enumerate(seq):
-        fires += scanner.update({"lane": (px, 0)}, i * 0.016)
-    assert [f.zone for f in fires] == ["lane", "lane"]
-
-
-def test_refractory_collapses_notes_that_are_too_close():
-    cfg = Config()
-    cfg.zones = [
-        Zone(name="lane", rect=(0.1, 0.5, 0.9, 0.52), match="red", thresh_red=40,
-             refractory_ms=200.0)
-    ]
-    scanner = ZoneScanner(cfg)
-    fires = []
-    for i, px in enumerate([400] * 3 + [0] * 3 + [400] * 3):
-        fires += scanner.update({"lane": (px, 0)}, i * 0.016)
-    assert len(fires) == 1
-
-
-def test_hysteresis_prevents_flicker_at_the_threshold():
-    """Counts hovering at the threshold must not retrigger."""
-    cfg = Config()
-    cfg.zones = [
-        Zone(name="lane", rect=(0.1, 0.5, 0.9, 0.52), match="red", thresh_red=40,
-             hysteresis=0.6, refractory_ms=0.0)
-    ]
-    scanner = ZoneScanner(cfg)
-    fires = []
-    # dips to 30, which is above 40 * 0.6 = 24, so the zone stays latched
-    for i, px in enumerate([45, 38, 42, 30, 44, 39]):
-        fires += scanner.update({"lane": (px, 0)}, i * 0.016)
-    assert len(fires) == 1
-
-
-def test_suppressed_zone_stays_latched():
-    """A zone suppressed this frame must not fire on the next one."""
-    cfg = Config()
-    cfg.zones = [
-        Zone(name="both", rect=(0.1, 0.5, 0.9, 0.52), match="both", taps=("red", "blue"),
-             thresh_red=40, thresh_blue=30, priority=10),
-        Zone(name="red", rect=(0.1, 0.5, 0.9, 0.52), match="red", taps=("red",), thresh_red=40),
-    ]
-    scanner = ZoneScanner(cfg)
-    first = scanner.update({"both": (400, 400), "red": (400, 400)}, 0.0)
-    assert [f.zone for f in first] == ["both"]
-    second = scanner.update({"both": (400, 400), "red": (400, 400)}, 0.016)
-    assert second == []
-
-
-def test_partial_overlap_is_not_suppressed():
-    """A fire is only dropped when a higher zone covers *all* of its drums."""
-    cfg = Config()
-    cfg.zones = [
-        Zone(name="hi", rect=(0.1, 0.5, 0.9, 0.52), match="red", taps=("red",), priority=10),
-        Zone(name="lo", rect=(0.1, 0.5, 0.9, 0.52), match="blue", taps=("red", "blue"),
-             thresh_blue=30),
-    ]
-    scanner = ZoneScanner(cfg)
-    fires = scanner.update({"hi": (400, 400), "lo": (400, 400)}, 0.0)
-    assert [f.zone for f in fires] == ["hi", "lo"]
-    assert scanner.taps_for(fires) == ["red", "blue"]
-
-
-def test_match_rules():
-    z = Zone(name="z", rect=(0, 0, 1, 1), thresh_red=40, thresh_blue=30)
-    for match, expected in [
-        ("red", [True, False, True, False]),
-        ("blue", [False, True, True, False]),
-        ("both", [False, False, True, False]),
-        ("any", [True, True, True, False]),
-    ]:
-        z.match = match
-        got = [z.hit(*c) for c in [(50, 0), (0, 50), (50, 50), (0, 0)]]
-        assert got == expected, match
-
-
-def test_disabled_zones_are_ignored():
-    cfg = Config()
-    cfg.zone("disco").enabled = False
-    assert "disco" not in [z.name for z in cfg.active_zones()]
-    assert "disco" not in ZoneReader(cfg, 1206, 2622).slices
-
-
-def test_zones_are_evaluated_highest_priority_first():
-    cfg = Config()
-    priorities = [z.priority for z in cfg.active_zones()]
-    assert priorities == sorted(priorities, reverse=True)
 
 
 # --------------------------------------------------------------------------
@@ -239,9 +132,21 @@ def test_thresholds_still_pass_at_recording_resolution():
     cfg = front_config()
     for name, expected in CASES:
         small = cv2.resize(load(name), (616, 1336))
-        scanner = ZoneScanner(cfg)
-        fires = scanner.update(sample_counts(cfg, small), t=0.0)
-        assert scanner.taps_for(fires) == expected, f"{name} at 616x1336"
+        got = resolve_taps(cfg.active_zones(), sample_counts(cfg, small), cfg.tap_order)
+        assert got == expected, f"{name} at 616x1336"
+
+
+def test_shipped_box_has_margin_on_every_reference_frame():
+    """Counts should sit well clear of the threshold, not just past it."""
+    cfg = front_config()
+    front = cfg.group("front")[0]
+    for name, expected in CASES:
+        red_px, blue_px = counts_for(cfg, name)[front.name]
+        live = max(red_px, blue_px)
+        assert live > front.thresh_red * 2, f"{name}: only {live} vs {front.thresh_red}"
+        quiet = min(red_px, blue_px)
+        if len(expected) == 1:
+            assert quiet < front.thresh_red * 0.5, f"{name}: {quiet} leaking into the other gate"
 
 
 def test_zone_reader_origin_matches_full_frame_slice():

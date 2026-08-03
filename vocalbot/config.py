@@ -119,58 +119,78 @@ class Zone:
 
 
 def default_zones() -> list[Zone]:
-    """Zones measured off the reference frames in assets/frames.
+    """Zones measured off the gameplay recording and the reference frames.
 
-    The lane strip sits high on the runway (y ~0.534). Below about 0.60 the
-    frontmost note glyphs overlap into one continuous run, so consecutive
-    same-colour notes merge into a single detection. Placing it high also buys
-    the lead time that absorbs mirroring latency.
+    The queue is static: the front note sits in a fixed slot until it is
+    cleared, so the boxes go on that slot rather than anywhere up the runway.
+    Verified frame by frame against a recording where the correct answer was
+    read off screen - box `front` is 10/10 on those frames and reads single
+    notes as single rather than over-reading the note behind them.
 
-    Thresholds are in subsampled pixels (step=3). Measured at the lane strip:
-    red signal 128-281 against a floor of 0; blue signal ~50 against a floor of
-    13.
+    The box was chosen by sweeping geometry against the recording and scoring
+    each candidate on how consistently it reads the *same* answer for the whole
+    time one note occupies the slot. A box reaching too far up starts catching
+    the note behind and flickers between "red" and "red+blue" mid-note; this one
+    scores 0.997. Narrower boxes score marginally higher but hug the centre
+    closely enough to risk missing a note at the edge of a lane.
 
-    The disco box is deliberately small and sits inside where the mirror ball
-    passes: it reads 1113 blue on the disco frame against at most 2 on every
-    other frame. A wider box catches stray note colour and collapses that margin
-    to about 5x, as well as enlarging the captured union.
+    Thresholds are in subsampled pixels (step=3), normalised to the reference
+    screen so they hold at any mirror window size. At the front slot a note
+    reads in the thousands against a floor near zero, so 200 sits far from both.
+
+    The disco zone sits on the same box. Under the queue model the mirror ball
+    simply *is* the front note when its turn comes, and it reads as blue there
+    (r=0, b=1230-2385 in the recording) - indistinguishable by count from an
+    ordinary blue note at 1444-1594, and not needing to be, since both tap blue.
+    It is kept as an explicit, adjustable rule rather than a special case; being
+    on the same box means it costs nothing to capture.
     """
-    lane = (_f(150, REF_W), _f(1400, REF_H), _f(1060, REF_W), _f(1424, REF_H))
-    disco = (_f(485, REF_W), _f(1580, REF_H), _f(725, REF_W), _f(1700, REF_H))
+    front = (0.25, 0.650, 0.75, 0.700)
     return [
         Zone(
             name="disco",
-            rect=disco,
+            rect=front,
             match="blue",  # only the blue count is consulted for this match
             taps=("blue",),
-            thresh_blue=300,
+            thresh_blue=1000,
             priority=20,
-            refractory_ms=400.0,  # the ball is large and lingers
-            group="disco",
+            group="front",
         ),
         Zone(
             name="both",
-            rect=lane,
+            rect=front,
             match="both",
             taps=("red", "blue"),
-            thresh_red=40,
-            thresh_blue=30,
+            thresh_red=200,
+            thresh_blue=200,
             priority=10,
+            group="front",
         ),
-        Zone(name="red", rect=lane, match="red", taps=("red",), thresh_red=40, priority=0),
-        Zone(name="blue", rect=lane, match="blue", taps=("blue",), thresh_blue=30, priority=0),
+        Zone(name="red", rect=front, match="red", taps=("red",), thresh_red=200,
+             thresh_blue=200, priority=0, group="front"),
+        Zone(name="blue", rect=front, match="blue", taps=("blue",), thresh_red=200,
+             thresh_blue=200, priority=0, group="front"),
     ]
 
 
 @dataclass
 class Config:
-    # --- playfield bounds, used by the offline reference tracker --------------
+    # --- playfield bounds, used by offline analysis --------------------------
     lane_x0: float = _f(150, REF_W)
     lane_x1: float = _f(1060, REF_W)
 
     # --- detection ------------------------------------------------------------
     zones: list[Zone] = field(default_factory=default_zones)
     step: int = 3  # subsample stride; thresholds are in subsampled pixels
+
+    # --- queue advance detection ---------------------------------------------
+    # The front slot is static between notes, so a tap is triggered by the slot
+    # changing rather than by a note arriving. Measured on the recording:
+    # 87% of frames sit under 3.0 (settled), 9% sit over 6.0 (mid-animation).
+    sig_stable: float = 3.0  # frame-to-frame diff counting as "not moving"
+    sig_change: float = 6.0  # diff from the last tap counting as "new note"
+    settle_frames: int = 3  # frames of stillness before trusting a read
+    retry_ms: float = 900.0  # re-tap if the slot hasn't changed by now
 
     # --- colour gates ---------------------------------------------------------
     # Gated on the note glyphs, which are far more saturated than the pale

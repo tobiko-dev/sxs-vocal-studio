@@ -1,12 +1,19 @@
-"""The live loop: grab the zone union -> count per zone -> resolve -> tap."""
+"""The live loop.
+
+    grab the front slot -> count colours -> has it changed? -> tap
+
+The queue is static, so this is a closed loop: after tapping, the bot waits for
+the slot to actually change before tapping again. That is what absorbs mirroring
+latency - however long the round trip, the bot cannot run ahead of the game.
+"""
 
 from __future__ import annotations
 
 import time
 
 from .capture import ZoneCapture
-from .color import build_lut, classify, fan_out
-from .scanner import ZoneScanner
+from .color import build_lut, classify, fan_out, signature
+from .queuescan import QueueScanner
 from .tap import TapWorker, make_tapper
 
 
@@ -15,8 +22,10 @@ class Bot:
         self.cfg = cfg
         self.verbose = verbose
         self.lut = build_lut(cfg)
-        self.scanner = ZoneScanner(cfg)
+        self.scanner = QueueScanner(cfg)
         self.capture = ZoneCapture(cfg)
+        # The signature is taken from the box the front-slot zones share.
+        self.sig_rect = cfg.zone(cfg.group("front")[0].name).rect
         self.tapper = make_tapper(dry_run)
         self.worker = TapWorker(cfg, self.tapper)
         self.frames = 0
@@ -32,22 +41,22 @@ class Bot:
                 if duration is not None and frame_start - t0 >= duration:
                     break
 
+                regions = self.capture.grab_zones()
                 by_rect = {
                     rect: classify(px, self.lut, self.cfg.step, self.capture.norm)
-                    for rect, px in self.capture.grab_zones().items()
+                    for rect, px in regions.items()
                 }
                 counts = fan_out(by_rect, self.capture.rect_groups)
-                fires = self.scanner.update(counts, frame_start)
+                sig = signature(regions[self.sig_rect])
+                shot = self.scanner.update(counts, sig, frame_start)
 
-                if fires:
-                    taps = self.scanner.taps_for(fires)
-                    self.worker.submit(taps)
+                if shot is not None:
+                    self.worker.submit(list(shot.taps))
                     if self.verbose:
-                        which = ",".join(f.zone for f in fires)
+                        red_px, blue_px = counts[self.cfg.group("front")[0].name]
                         print(
-                            f"[{frame_start - t0:7.3f}s] {which:<12s} -> "
-                            f"{'+'.join(taps):<10s} "
-                            + " ".join(f"{n}={c[0]}/{c[1]}" for n, c in counts.items())
+                            f"[{frame_start - t0:7.3f}s] {'+'.join(shot.taps):<9s} "
+                            f"({shot.reason})  r={red_px:5d} b={blue_px:5d}"
                         )
 
                 self.frames += 1
@@ -70,11 +79,8 @@ class Bot:
             f"({self.frames / max(wall, 1e-9):.0f} fps, "
             f"{self.loop_ms_total / self.frames:.2f} ms/frame)"
         )
-        per_zone = "  ".join(
-            f"{name}={st.fired}" for name, st in self.scanner.state.items() if st.fired
-        )
-        print(f"fired  {per_zone or '(none)'}")
         print(
-            f"taps={self.worker.dispatched}  dropped={self.worker.dropped}  "
-            f"suppressed={self.scanner.suppressed}"
+            f"notes={self.scanner.dispatched}  retries={self.scanner.retries}  "
+            f"idle={self.scanner.idle_frames}"
         )
+        print(f"taps={self.worker.dispatched}  dropped={self.worker.dropped}")

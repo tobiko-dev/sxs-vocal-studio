@@ -6,7 +6,7 @@
     vocalbot zone list|set|add|rm    edit zones without a GUI
     vocalbot probe                   live per-zone counts, no tapping
     vocalbot bench                   measure capture and classify cost
-    vocalbot tune RECORDING          fit boxes and thresholds to a recording
+    vocalbot replay RECORDING        run the detector over a recording, offline
     vocalbot run                     play
 """
 
@@ -280,16 +280,13 @@ def cmd_probe(args) -> int:
     return 0
 
 
-def cmd_tune(args) -> int:
-    from .tune import sweep
+def cmd_replay(args) -> int:
+    from .replay import report, write_overlay
 
     cfg = _load(args.config)
-    best = sweep(args.recording, cfg)
-    if args.write:
-        best.save(args.config)
-        print(f"wrote tuned values to {args.config}")
-    else:
-        print("\nre-run with --write to save these to the config")
+    report(args.recording, cfg, verbose=args.verbose)
+    if args.overlay:
+        write_overlay(args.recording, cfg, args.overlay)
     return 0
 
 
@@ -345,10 +342,11 @@ def main(argv=None) -> int:
     pr = sub.add_parser("probe", help="live per-zone counts, no tapping")
     pr.set_defaults(func=cmd_probe)
 
-    t = sub.add_parser("tune", help="fit zones and thresholds to a recording")
+    t = sub.add_parser("replay", help="run the detector over a recording, offline")
     t.add_argument("recording")
-    t.add_argument("--write", action="store_true")
-    t.set_defaults(func=cmd_tune)
+    t.add_argument("--verbose", action="store_true", help="list every detected note")
+    t.add_argument("--overlay", help="write an annotated video to this path")
+    t.set_defaults(func=cmd_replay)
 
     r = sub.add_parser("run", help="play")
     r.add_argument("--dry-run", action="store_true", help="detect but never tap")

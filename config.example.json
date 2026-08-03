@@ -5,86 +5,90 @@
     {
       "name": "disco",
       "rect": [
-        0.402156,
-        0.602593,
-        0.601161,
-        0.64836
+        0.25,
+        0.65,
+        0.75,
+        0.7
       ],
       "match": "blue",
       "taps": [
         "blue"
       ],
       "thresh_red": 40,
-      "thresh_blue": 300,
+      "thresh_blue": 1000,
       "priority": 20,
-      "refractory_ms": 400.0,
+      "refractory_ms": 55.0,
       "hysteresis": 0.6,
-      "group": "disco",
+      "group": "front",
       "enabled": true
     },
     {
       "name": "both",
       "rect": [
-        0.124378,
-        0.533944,
-        0.878939,
-        0.543097
+        0.25,
+        0.65,
+        0.75,
+        0.7
       ],
       "match": "both",
       "taps": [
         "red",
         "blue"
       ],
-      "thresh_red": 40,
-      "thresh_blue": 30,
+      "thresh_red": 200,
+      "thresh_blue": 200,
       "priority": 10,
       "refractory_ms": 55.0,
       "hysteresis": 0.6,
-      "group": "lane",
+      "group": "front",
       "enabled": true
     },
     {
       "name": "red",
       "rect": [
-        0.124378,
-        0.533944,
-        0.878939,
-        0.543097
+        0.25,
+        0.65,
+        0.75,
+        0.7
       ],
       "match": "red",
       "taps": [
         "red"
       ],
-      "thresh_red": 40,
-      "thresh_blue": 30,
+      "thresh_red": 200,
+      "thresh_blue": 200,
       "priority": 0,
       "refractory_ms": 55.0,
       "hysteresis": 0.6,
-      "group": "lane",
+      "group": "front",
       "enabled": true
     },
     {
       "name": "blue",
       "rect": [
-        0.124378,
-        0.533944,
-        0.878939,
-        0.543097
+        0.25,
+        0.65,
+        0.75,
+        0.7
       ],
       "match": "blue",
       "taps": [
         "blue"
       ],
-      "thresh_red": 40,
-      "thresh_blue": 30,
+      "thresh_red": 200,
+      "thresh_blue": 200,
       "priority": 0,
       "refractory_ms": 55.0,
       "hysteresis": 0.6,
-      "group": "lane",
+      "group": "front",
       "enabled": true
     }
   ],
   "step": 3,
+  "sig_stable": 3.0,
+  "sig_change": 6.0,
+  "settle_frames": 3,
+  "retry_ms": 900.0,
   "red": {
     "h_lo": 150,
     "h_hi": 9,
