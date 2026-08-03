@@ -1,9 +1,10 @@
 """Offline tuning against a screen recording.
 
-Three values can't be derived from still frames because they depend on motion:
-the scanline height, the pixel thresholds, and the refractory period. This module
-fits them by using an expensive-but-accurate blob tracker over the full playfield
-as ground truth, then sweeping the cheap scanline until it agrees.
+Three things can't be derived from still frames because they depend on motion:
+where the lane zones sit vertically, the pixel thresholds, and the refractory
+period. This module fits them by using an expensive-but-accurate blob tracker
+over the full playfield as ground truth, then sweeping the cheap zone detector
+until it agrees.
 
     vocalbot tune song.mov --config config.json
 
@@ -18,9 +19,9 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from .color import build_lut, classify
+from .color import ZoneReader
 from .config import Config
-from .scanner import Scanner
+from .scanner import ZoneScanner
 
 # Playfield band used by the reference tracker. Wider than the scanline, and
 # starting below the COMBO / FEVER banner so that text can't be mistaken for a
@@ -75,8 +76,14 @@ def _blobs(roi_bgr, cfg, y_off, x_off):
 
 
 def reference_events(path: str, cfg: Config, line_frac: float | None = None) -> list[Event]:
-    """Ground-truth events from blob tracking. Slow; offline only."""
-    line_frac = cfg.scan_y if line_frac is None else line_frac
+    """Ground-truth events from blob tracking. Slow; offline only.
+
+    The line defaults to the vertical centre of the lane-group zones, so the
+    reference and the cheap detector are measuring notes at the same depth.
+    """
+    if line_frac is None:
+        lane = cfg.group("lane") or cfg.active_zones()
+        line_frac = sum((z.rect[1] + z.rect[3]) / 2 for z in lane) / len(lane)
     tracks: list[dict] = []
     events: list[Event] = []
     next_id = 0
@@ -117,19 +124,22 @@ def reference_events(path: str, cfg: Config, line_frac: float | None = None) -> 
     return events
 
 
-def scanline_events(path: str, cfg: Config) -> list[Event]:
-    """Events the cheap live detector would produce on this recording."""
-    lut = build_lut(cfg)
-    scanner = Scanner(cfg)
+def zone_events(path: str, cfg: Config) -> list[Event]:
+    """Events the cheap live detector would produce on this recording.
+
+    One Event per drum pressed, so a "both" fire yields two, matching how the
+    reference tracker counts a simultaneous pair.
+    """
+    scanner = ZoneScanner(cfg)
+    reader = None
     events: list[Event] = []
     for t, frame in _frames(path):
-        fh, fw = frame.shape[:2]
-        y = int(cfg.scan_y * fh)
-        h = max(2, int(cfg.scan_h * fh))
-        x0, x1 = int(cfg.lane_x0 * fw), int(cfg.lane_x1 * fw)
-        red_px, blue_px = classify(frame[y : y + h, x0:x1], lut, cfg.step)
-        for fire in scanner.update(red_px, blue_px, t):
-            events.append(Event(t, fire.color))
+        if reader is None:
+            fh, fw = frame.shape[:2]
+            reader = ZoneReader(cfg, fw, fh)
+        for fire in scanner.update(reader.read(frame), t):
+            for drum in fire.taps:
+                events.append(Event(t, drum))
     return events
 
 
@@ -159,9 +169,16 @@ def score(got: list[Event], want: list[Event], tol: float = 0.12) -> dict:
     }
 
 
+def _shift_group(cfg: Config, group: str, y_top: float) -> None:
+    """Move every zone in a group so its box starts at y_top, keeping height."""
+    for zone in cfg.group(group):
+        x0, y0, x1, y1 = zone.rect
+        zone.rect = (x0, y_top, x1, min(1.0, y_top + (y1 - y0)))
+
+
 def sweep(path: str, cfg: Config) -> Config:
-    """Grid search scanline position, thresholds and refractory against the
-    reference tracker. Returns the best config found."""
+    """Grid search the lane zones' vertical position, thresholds and refractory
+    against the reference tracker. Returns the best config found."""
     print("building reference (blob tracker, this is the slow part)...")
     ref = reference_events(path, cfg)
     print(f"reference: {len(ref)} notes "
@@ -172,28 +189,32 @@ def sweep(path: str, cfg: Config) -> Config:
 
     best, best_cfg = None, cfg
     y_grid = [round(y / 2622, 4) for y in range(1150, 1560, 50)]
-    thresh_grid = [4, 6, 8, 10, 14, 20, 28]
+    thresh_grid = [(20, 15), (30, 22), (40, 30), (55, 42), (75, 60), (100, 80)]
     refractory_grid = [40.0, 55.0, 70.0, 90.0]
 
-    print(f"{'scan_y':>8} {'thresh':>7} {'refr':>6} {'P':>6} {'R':>6} {'F1':>6}")
-    for scan_y in y_grid:
-        for thresh in thresh_grid:
+    print(f"{'lane_y':>8} {'thr r/b':>9} {'refr':>6} {'P':>6} {'R':>6} {'F1':>6}")
+    for lane_y in y_grid:
+        for thresh_red, thresh_blue in thresh_grid:
             for refractory in refractory_grid:
                 trial = copy.deepcopy(cfg)
-                trial.scan_y = scan_y
-                trial.thresh_red = trial.thresh_blue = thresh
-                trial.refractory_ms = refractory
-                res = score(scanline_events(path, trial), ref)
+                _shift_group(trial, "lane", lane_y)
+                for zone in trial.group("lane"):
+                    zone.thresh_red = thresh_red
+                    zone.thresh_blue = thresh_blue
+                    zone.refractory_ms = refractory
+                res = score(zone_events(path, trial), ref)
                 if best is None or res["f1"] > best["f1"]:
                     best, best_cfg = res, trial
                     print(
-                        f"{scan_y:8.4f} {thresh:7d} {refractory:6.0f} "
+                        f"{lane_y:8.4f} {thresh_red:4d}/{thresh_blue:<4d} {refractory:6.0f} "
                         f"{res['precision']:6.3f} {res['recall']:6.3f} {res['f1']:6.3f}  <- best"
                     )
 
+    lane = best_cfg.group("lane")[0]
     print(
-        f"\nbest: scan_y={best_cfg.scan_y}  thresh={best_cfg.thresh_red}  "
-        f"refractory={best_cfg.refractory_ms}ms  F1={best['f1']:.3f} "
-        f"({best['hits']}/{best['want']} notes)"
+        f"\nbest: lane_y={lane.rect[1]:.4f}  thresh={lane.thresh_red}/{lane.thresh_blue}  "
+        f"refractory={lane.refractory_ms}ms  F1={best['f1']:.3f} "
+        f"({best['hits']}/{best['want']} drum presses)"
     )
+    print("note: the disco zone is not swept - set it with `vocalbot zone set disco`")
     return best_cfg

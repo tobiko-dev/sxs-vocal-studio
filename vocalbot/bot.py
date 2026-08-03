@@ -1,12 +1,12 @@
-"""The live loop: grab strip -> classify -> edge detect -> tap."""
+"""The live loop: grab the zone union -> count per zone -> resolve -> tap."""
 
 from __future__ import annotations
 
 import time
 
-from .capture import open_capture
-from .color import build_lut, classify
-from .scanner import Scanner
+from .capture import ZoneCapture
+from .color import build_lut, classify, fan_out
+from .scanner import ZoneScanner
 from .tap import TapWorker, make_tapper
 
 
@@ -15,8 +15,8 @@ class Bot:
         self.cfg = cfg
         self.verbose = verbose
         self.lut = build_lut(cfg)
-        self.scanner = Scanner(cfg)
-        self.capture = open_capture(cfg)
+        self.scanner = ZoneScanner(cfg)
+        self.capture = ZoneCapture(cfg)
         self.tapper = make_tapper(dry_run)
         self.worker = TapWorker(cfg, self.tapper)
         self.frames = 0
@@ -32,17 +32,22 @@ class Bot:
                 if duration is not None and frame_start - t0 >= duration:
                     break
 
-                strip = self.capture.grab()
-                red_px, blue_px = classify(strip, self.lut, self.cfg.step)
-                fires = self.scanner.update(red_px, blue_px, frame_start)
+                by_rect = {
+                    rect: classify(px, self.lut, self.cfg.step)
+                    for rect, px in self.capture.grab_zones().items()
+                }
+                counts = fan_out(by_rect, self.capture.rect_groups)
+                fires = self.scanner.update(counts, frame_start)
 
                 if fires:
-                    self.worker.submit([f.color for f in fires])
+                    taps = self.scanner.taps_for(fires)
+                    self.worker.submit(taps)
                     if self.verbose:
-                        combo = "+".join(f.color for f in fires)
+                        which = ",".join(f.zone for f in fires)
                         print(
-                            f"[{frame_start - t0:7.3f}s] {combo:<10s} "
-                            f"red={red_px:4d} blue={blue_px:4d}"
+                            f"[{frame_start - t0:7.3f}s] {which:<12s} -> "
+                            f"{'+'.join(taps):<10s} "
+                            + " ".join(f"{n}={c[0]}/{c[1]}" for n, c in counts.items())
                         )
 
                 self.frames += 1
@@ -58,14 +63,18 @@ class Bot:
     def shutdown(self, wall: float) -> None:
         self.worker.stop()
         self.capture.close()
-        if self.frames:
-            print(
-                f"\n{self.frames} frames in {wall:.1f}s "
-                f"({self.frames / max(wall, 1e-9):.0f} fps, "
-                f"{self.loop_ms_total / self.frames:.2f} ms/frame)"
-            )
-            print(
-                f"fired  red={self.scanner.fired['red']}  "
-                f"blue={self.scanner.fired['blue']}  "
-                f"taps={self.worker.dispatched}  dropped={self.worker.dropped}"
-            )
+        if not self.frames:
+            return
+        print(
+            f"\n{self.frames} frames in {wall:.1f}s "
+            f"({self.frames / max(wall, 1e-9):.0f} fps, "
+            f"{self.loop_ms_total / self.frames:.2f} ms/frame)"
+        )
+        per_zone = "  ".join(
+            f"{name}={st.fired}" for name, st in self.scanner.state.items() if st.fired
+        )
+        print(f"fired  {per_zone or '(none)'}")
+        print(
+            f"taps={self.worker.dispatched}  dropped={self.worker.dropped}  "
+            f"suppressed={self.scanner.suppressed}"
+        )

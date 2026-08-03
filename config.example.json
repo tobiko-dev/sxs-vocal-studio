@@ -1,16 +1,90 @@
 {
-  "lane_x0": 0.12437810945273632,
-  "lane_x1": 0.87893864013267,
-  "scan_y": 0.5339435545385202,
-  "scan_h": 0.009153318077803204,
-  "drum_red": [
-    0.809,
-    0.802
+  "lane_x0": 0.124378,
+  "lane_x1": 0.878939,
+  "zones": [
+    {
+      "name": "disco",
+      "rect": [
+        0.402156,
+        0.602593,
+        0.601161,
+        0.64836
+      ],
+      "match": "blue",
+      "taps": [
+        "blue"
+      ],
+      "thresh_red": 40,
+      "thresh_blue": 300,
+      "priority": 20,
+      "refractory_ms": 400.0,
+      "hysteresis": 0.6,
+      "group": "disco",
+      "enabled": true
+    },
+    {
+      "name": "both",
+      "rect": [
+        0.124378,
+        0.533944,
+        0.878939,
+        0.543097
+      ],
+      "match": "both",
+      "taps": [
+        "red",
+        "blue"
+      ],
+      "thresh_red": 40,
+      "thresh_blue": 30,
+      "priority": 10,
+      "refractory_ms": 55.0,
+      "hysteresis": 0.6,
+      "group": "lane",
+      "enabled": true
+    },
+    {
+      "name": "red",
+      "rect": [
+        0.124378,
+        0.533944,
+        0.878939,
+        0.543097
+      ],
+      "match": "red",
+      "taps": [
+        "red"
+      ],
+      "thresh_red": 40,
+      "thresh_blue": 30,
+      "priority": 0,
+      "refractory_ms": 55.0,
+      "hysteresis": 0.6,
+      "group": "lane",
+      "enabled": true
+    },
+    {
+      "name": "blue",
+      "rect": [
+        0.124378,
+        0.533944,
+        0.878939,
+        0.543097
+      ],
+      "match": "blue",
+      "taps": [
+        "blue"
+      ],
+      "thresh_red": 40,
+      "thresh_blue": 30,
+      "priority": 0,
+      "refractory_ms": 55.0,
+      "hysteresis": 0.6,
+      "group": "lane",
+      "enabled": true
+    }
   ],
-  "drum_blue": [
-    0.185,
-    0.802
-  ],
+  "step": 3,
   "red": {
     "h_lo": 150,
     "h_hi": 9,
@@ -25,11 +99,14 @@
     "v_min": 90,
     "wrap": false
   },
-  "step": 3,
-  "thresh_red": 10,
-  "thresh_blue": 10,
-  "hysteresis": 0.6,
-  "refractory_ms": 55.0,
+  "drum_red": [
+    0.809,
+    0.802
+  ],
+  "drum_blue": [
+    0.185,
+    0.802
+  ],
   "tap_hold_ms": 12.0,
   "inter_tap_ms": 6.0,
   "tap_order": [
@@ -43,5 +120,6 @@
     910
   ],
   "backend": "mss",
+  "capture_mode": "union",
   "target_fps": 240
 }

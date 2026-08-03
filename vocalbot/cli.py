@@ -1,4 +1,14 @@
-"""Command line entry point: calibrate | bench | tune | run | probe."""
+"""Command line entry point.
+
+    vocalbot calibrate window        pin the mirroring window, save its rect
+    vocalbot calibrate zones         drag the detection boxes
+    vocalbot calibrate drums         click the two drum targets
+    vocalbot zone list|set|add|rm    edit zones without a GUI
+    vocalbot probe                   live per-zone counts, no tapping
+    vocalbot bench                   measure capture and classify cost
+    vocalbot tune RECORDING          fit boxes and thresholds to a recording
+    vocalbot run                     play
+"""
 
 from __future__ import annotations
 
@@ -7,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import Config
+from .config import DRUMS, MATCHES, Config, Zone
 
 DEFAULT_CONFIG = "config.json"
 
@@ -19,103 +29,234 @@ def _load(path: str) -> Config:
     return Config()
 
 
-def cmd_calibrate(args) -> int:
-    """Locate the mirroring window and dump an annotated screenshot to check
-    the ROI, scanline and drum targets line up."""
+def _frame(cfg, image: str | None):
+    """A full phone-screen frame, from a file or a live grab."""
     import cv2
-    import numpy as np
 
-    from .capture import find_mirror_window
+    if image:
+        img = cv2.imread(image)
+        if img is None:
+            raise SystemExit(f"cannot read {image}")
+        return img
+    from .capture import grab_window
+
+    if cfg.window_rect is None:
+        raise SystemExit("no window_rect - run `vocalbot calibrate window`, or pass --image")
+    return grab_window(cfg)
+
+
+# --------------------------------------------------------------------------
+def cmd_calibrate(args) -> int:
+    import cv2
+
+    from .calibrate import edit_drums, edit_zones, render_overlay, report, sample_counts
 
     cfg = _load(args.config)
-    rect = find_mirror_window()
-    if rect is None:
-        print("iPhone Mirroring window not found.")
-        print("Open it, start the song, then re-run. To set the rect by hand:")
-        print('  {"window_rect": [x, y, width, height]}')
-        return 1
 
-    x, y, w, h = rect
-    print(f"window at ({x}, {y}) {w}x{h}")
-    if args.chrome:
-        y += args.chrome
-        h -= args.chrome
-        print(f"trimmed {args.chrome}px of title bar -> ({x}, {y}) {w}x{h}")
-    cfg.window_rect = (x, y, w, h)
+    if args.what == "window":
+        from .capture import find_mirror_window
 
-    import mss
+        rect = find_mirror_window()
+        if rect is None:
+            print("iPhone Mirroring window not found. Open it, start the song, retry.")
+            print('Or set it by hand in the config: "window_rect": [x, y, width, height]')
+            return 1
+        x, y, w, h = rect
+        print(f"window at ({x}, {y}) {w}x{h}")
+        if args.chrome:
+            y, h = y + args.chrome, h - args.chrome
+            print(f"trimmed {args.chrome}px of title bar -> ({x}, {y}) {w}x{h}")
+        aspect = w / h
+        print(f"content aspect {aspect:.4f} (phone is 0.4600) - a big mismatch means")
+        print("the title bar trim is wrong or the window is letterboxed")
+        cfg.window_rect = (x, y, w, h)
+        cfg.save(args.config)
+        print(f"saved to {args.config}")
+        return 0
 
-    with mss.mss() as sct:
-        shot = sct.grab({"left": x, "top": y, "width": w, "height": h})
-    img = np.frombuffer(shot.raw, np.uint8).reshape(shot.height, shot.width, 4)[:, :, :3].copy()
+    img = _frame(cfg, args.image)
+    changed = False
+    if args.what == "zones":
+        changed = edit_zones(cfg, img, only=args.only)
+    elif args.what == "drums":
+        changed = edit_drums(cfg, img)
 
-    lx0, lx1 = int(cfg.lane_x0 * w), int(cfg.lane_x1 * w)
-    sy, sh = int(cfg.scan_y * h), max(2, int(cfg.scan_h * h))
-    cv2.rectangle(img, (lx0, sy), (lx1, sy + sh), (0, 255, 0), 2)
-    cv2.putText(img, "scanline", (lx0, sy - 8), 0, 0.6, (0, 255, 0), 2)
-    for color, bgr in (("red", (0, 0, 255)), ("blue", (255, 180, 0))):
-        fx, fy = cfg.drum(color)
-        cv2.circle(img, (int(fx * w), int(fy * h)), 18, bgr, 3)
-
-    cv2.imwrite(args.out, img)
-    cfg.save(args.config)
-    print(f"wrote {args.out} and {args.config}")
-    print("check that the green strip crosses the note runway and the circles sit")
-    print("on the two drums; adjust lane_x0/lane_x1/scan_y/drum_* if not.")
+    print()
+    print(report(cfg, img))
+    cv2.imwrite(args.out, render_overlay(cfg, img, counts=sample_counts(cfg, img)))
+    print(f"\nwrote {args.out}")
+    if changed:
+        cfg.save(args.config)
+        print(f"saved to {args.config}")
     return 0
 
 
+def cmd_zone(args) -> int:
+    cfg = _load(args.config)
+
+    if args.action == "list":
+        from .calibrate import report
+
+        if args.image:
+            print(report(cfg, _frame(cfg, args.image)))
+            return 0
+        print(f"{'zone':<10} {'match':<6} {'taps':<10} {'prio':>4} {'thr r/b':>10}  rect")
+        for z in sorted(cfg.zones, key=lambda z: -z.priority):
+            rect = ", ".join(f"{v:.4f}" for v in z.rect)
+            flag = "" if z.enabled else "  (disabled)"
+            print(
+                f"{z.name:<10} {z.match:<6} {'+'.join(z.taps):<10} {z.priority:>4} "
+                f"{z.thresh_red:>4}/{z.thresh_blue:<5}  [{rect}]{flag}"
+            )
+        return 0
+
+    if args.action == "rm":
+        before = len(cfg.zones)
+        cfg.zones = [z for z in cfg.zones if z.name != args.name]
+        if len(cfg.zones) == before:
+            print(f"no zone named {args.name!r}", file=sys.stderr)
+            return 1
+        cfg.save(args.config)
+        print(f"removed {args.name}")
+        return 0
+
+    if args.action == "add":
+        if any(z.name == args.name for z in cfg.zones):
+            print(f"zone {args.name!r} already exists", file=sys.stderr)
+            return 1
+        if not args.rect:
+            print("--rect is required when adding a zone", file=sys.stderr)
+            return 1
+        zone = Zone(name=args.name, rect=_parse_rect(args.rect))
+        cfg.zones.append(zone)
+    else:  # set
+        try:
+            zone = cfg.zone(args.name)
+        except KeyError:
+            print(f"no zone named {args.name!r}", file=sys.stderr)
+            return 1
+
+    if args.rect:
+        zone.rect = _parse_rect(args.rect)
+    if args.match:
+        zone.match = args.match
+    if args.taps:
+        zone.taps = tuple(args.taps.split("+"))
+    if args.thresh_red is not None:
+        zone.thresh_red = args.thresh_red
+    if args.thresh_blue is not None:
+        zone.thresh_blue = args.thresh_blue
+    if args.priority is not None:
+        zone.priority = args.priority
+    if args.refractory is not None:
+        zone.refractory_ms = args.refractory
+    if args.enable:
+        zone.enabled = True
+    if args.disable:
+        zone.enabled = False
+
+    Zone(**{**zone.__dict__})  # revalidate
+    cfg.save(args.config)
+    print(f"{zone.name}: match={zone.match} taps={'+'.join(zone.taps)} "
+          f"thresh={zone.thresh_red}/{zone.thresh_blue} prio={zone.priority} "
+          f"rect={tuple(round(v, 4) for v in zone.rect)} enabled={zone.enabled}")
+    return 0
+
+
+def _parse_rect(text: str) -> tuple[float, float, float, float]:
+    parts = [float(p) for p in text.replace(" ", "").split(",")]
+    if len(parts) != 4:
+        raise SystemExit("--rect wants four fractions: x0,y0,x1,y1")
+    return tuple(parts)
+
+
 def cmd_bench(args) -> int:
-    """Measure the real loop rate. Capture is the bottleneck, not the colour math."""
     import numpy as np
 
     from .color import build_lut, classify
 
     cfg = _load(args.config)
     lut = build_lut(cfg)
+    sw, sh = 1206, 2622  # size as if the phone were at native resolution
+    regions = {}
+    for rect, names in cfg.rect_groups().items():
+        x0, y0, x1, y1 = cfg.zone(names[0]).pixel_rect(sw, sh)
+        regions[rect] = np.random.randint(
+            0, 255, (max(1, y1 - y0), max(1, x1 - x0), 3), dtype=np.uint8
+        )
 
-    fake = np.random.randint(0, 255, (24, 910, 3), dtype=np.uint8)
-    n = 2000
+    ux0, uy0, ux1, uy1 = cfg.union_rect()
+    union_px = int((ux1 - ux0) * sw) * int((uy1 - uy0) * sh)
+    zone_px = sum(r.shape[0] * r.shape[1] for r in regions.values())
+    print(f"zones           {len(cfg.active_zones())} active over {len(regions)} distinct boxes")
+    print(f"union box       {int((ux1 - ux0) * sw)}x{int((uy1 - uy0) * sh)} = {union_px:,} px")
+    print(f"zone pixels     {zone_px:,} px  ({100 * zone_px / max(union_px, 1):.0f}% of the union)")
+
+    for _ in range(100):
+        for name, px in regions.items():
+            classify(px, lut, cfg.step)
+    n = 1000
     t0 = time.perf_counter()
     for _ in range(n):
-        classify(fake, lut, cfg.step)
+        for name, px in regions.items():
+            classify(px, lut, cfg.step)
     classify_ms = (time.perf_counter() - t0) / n * 1000
     print(f"classify        {classify_ms:.4f} ms/frame  (step={cfg.step})")
 
     if cfg.window_rect is None:
-        print("no window_rect - run `calibrate` to benchmark capture too")
+        print("\nno window_rect - run `calibrate window` to benchmark capture too")
         return 0
 
-    from .capture import open_capture
+    from .capture import ZoneCapture
 
-    cap = open_capture(cfg)
-    cap.grab()
-    n = 300
-    t0 = time.perf_counter()
-    for _ in range(n):
-        strip = cap.grab()
-    capture_ms = (time.perf_counter() - t0) / n * 1000
-    cap.close()
-    print(f"capture         {capture_ms:.4f} ms/frame  (strip {strip.shape[1]}x{strip.shape[0]})")
-    total = capture_ms + classify_ms
-    print(f"total           {total:.4f} ms/frame  -> {1000 / total:.0f} fps ceiling")
+    best = None
+    for mode in ("union", "per_zone"):
+        cfg.capture_mode = mode
+        cap = ZoneCapture(cfg)
+        cap.grab_zones()
+        n = 300
+        t0 = time.perf_counter()
+        for _ in range(n):
+            cap.grab_zones()
+        ms = (time.perf_counter() - t0) / n * 1000
+        cap.close()
+        total = ms + classify_ms
+        print(f"capture:{mode:<9} {ms:.4f} ms/frame  -> {1000 / total:.0f} fps ceiling")
+        if best is None or ms < best[1]:
+            best = (mode, ms)
+    print(f"\nfastest capture_mode is {best[0]!r} - set it with:")
+    print(f'  python -m vocalbot.cli --config {args.config} ...  (edit "capture_mode")')
     return 0
 
 
 def cmd_probe(args) -> int:
-    """Print live pixel counts without tapping. Use to set thresholds by eye."""
-    from .capture import open_capture
-    from .color import build_lut, classify
+    from .capture import ZoneCapture
+    from .color import build_lut, classify, fan_out
+    from .scanner import ZoneScanner
 
     cfg = _load(args.config)
+    if cfg.window_rect is None:
+        print("no window_rect - run `vocalbot calibrate window` first", file=sys.stderr)
+        return 1
     lut = build_lut(cfg)
-    cap = open_capture(cfg)
-    print("red / blue glyph pixels at the scanline. ctrl-c to stop.\n")
+    scanner = ZoneScanner(cfg)
+    cap = ZoneCapture(cfg)
+    names = [z.name for z in cfg.active_zones()]
+    print("per-zone red/blue counts. ctrl-c to stop.")
+    print("  " + "  ".join(f"{n:>16}" for n in names))
     try:
         while True:
-            red_px, blue_px = classify(cap.grab(), lut, cfg.step)
-            bar = "#" * min(40, red_px) + "*" * min(40, blue_px)
-            print(f"\rred={red_px:5d} blue={blue_px:5d} |{bar:<80s}", end="", flush=True)
+            by_rect = {
+                rect: classify(px, lut, cfg.step) for rect, px in cap.grab_zones().items()
+            }
+            counts = fan_out(by_rect, cap.rect_groups)
+            fires = scanner.update(counts, time.perf_counter())
+            cells = []
+            for name in names:
+                r, b = counts[name]
+                mark = "*" if any(f.zone == name for f in fires) else " "
+                cells.append(f"{r:>7}/{b:<7}{mark}")
+            print("\r  " + "  ".join(cells), end="", flush=True)
             time.sleep(0.02)
     except KeyboardInterrupt:
         print()
@@ -142,7 +283,7 @@ def cmd_run(args) -> int:
 
     cfg = _load(args.config)
     if cfg.window_rect is None:
-        print("no window_rect - run `vocalbot calibrate` first", file=sys.stderr)
+        print("no window_rect - run `vocalbot calibrate window` first", file=sys.stderr)
         return 1
     if args.countdown:
         for i in range(args.countdown, 0, -1):
@@ -153,23 +294,44 @@ def cmd_run(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="vocalbot", description=__doc__)
+    p = argparse.ArgumentParser(prog="vocalbot", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    c = sub.add_parser("calibrate", help="find the mirror window, dump an overlay")
+    c = sub.add_parser("calibrate", help="place the window, zones and drums")
+    c.add_argument("what", choices=("window", "zones", "drums"))
+    c.add_argument("--image", help="calibrate against a saved screenshot instead of a live grab")
+    c.add_argument("--only", nargs="*", help="limit zone editing to these names")
     c.add_argument("--out", default="calibration.png")
-    c.add_argument("--chrome", type=int, default=0, help="title bar px to trim")
+    c.add_argument("--chrome", type=int, default=0, help="title bar px to trim (window only)")
     c.set_defaults(func=cmd_calibrate)
+
+    z = sub.add_parser("zone", help="inspect or edit zones without a GUI")
+    z.add_argument("action", choices=("list", "set", "add", "rm"))
+    z.add_argument("name", nargs="?")
+    z.add_argument("--rect", help="x0,y0,x1,y1 as fractions of the phone screen")
+    z.add_argument("--match", choices=MATCHES)
+    z.add_argument("--taps", help="drums to press, e.g. red, blue, or red+blue",
+                   metavar="|".join(DRUMS))
+    z.add_argument("--thresh-red", type=int)
+    z.add_argument("--thresh-blue", type=int)
+    z.add_argument("--priority", type=int)
+    z.add_argument("--refractory", type=float, help="ms")
+    z.add_argument("--enable", action="store_true")
+    z.add_argument("--disable", action="store_true")
+    z.add_argument("--image", help="with `list`, report counts on this screenshot")
+    z.set_defaults(func=cmd_zone)
 
     b = sub.add_parser("bench", help="measure capture and classify cost")
     b.set_defaults(func=cmd_bench)
 
-    pr = sub.add_parser("probe", help="live pixel counts, no tapping")
+    pr = sub.add_parser("probe", help="live per-zone counts, no tapping")
     pr.set_defaults(func=cmd_probe)
 
-    t = sub.add_parser("tune", help="fit thresholds against a screen recording")
+    t = sub.add_parser("tune", help="fit zones and thresholds to a recording")
     t.add_argument("recording")
     t.add_argument("--write", action="store_true")
     t.set_defaults(func=cmd_tune)
@@ -182,6 +344,8 @@ def main(argv=None) -> int:
     r.set_defaults(func=cmd_run)
 
     args = p.parse_args(argv)
+    if args.cmd == "zone" and args.action != "list" and not args.name:
+        p.error(f"zone {args.action} needs a zone name")
     return args.func(args)
 
 
