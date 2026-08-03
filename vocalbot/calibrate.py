@@ -2,7 +2,7 @@
 
 Two ways in, because the GUI is not always the convenient one:
 
-  vocalbot calibrate zones            drag boxes on a live or saved frame
+  vocalbot calibrate zones            drag and resize boxes (see editor.py)
   vocalbot zone set red --rect ...    edit a zone from the command line
 
 Both write back to the same config. `render_overlay` is shared by the GUI, the
@@ -93,38 +93,6 @@ def _require_gui():
             "this build of opencv has no GUI. Install opencv-python (not the "
             "headless variant), or use `vocalbot zone set` instead."
         )
-
-
-def edit_zones(cfg, img: np.ndarray, only: list[str] | None = None) -> bool:
-    """Drag a new box for each zone. Returns True if anything changed."""
-    _require_gui()
-    h, w = img.shape[:2]
-    changed = False
-    targets = [z for z in cfg.zones if not only or z.name in only]
-
-    for zone in targets:
-        preview = render_overlay(cfg, img, active=zone.name)
-        banner = f"drag box for '{zone.name}'  |  ENTER accept  ESC keep current"
-        cv2.putText(preview, banner, (20, 40), 0, 0.9, (255, 255, 255), 3, cv2.LINE_AA)
-        cv2.putText(preview, banner, (20, 40), 0, 0.9, (0, 0, 0), 1, cv2.LINE_AA)
-
-        box = cv2.selectROI("calibrate", preview, showCrosshair=False, fromCenter=False)
-        x, y, bw, bh = box
-        if bw > 4 and bh > 4:
-            zone.rect = (
-                round(x / w, 6),
-                round(y / h, 6),
-                round((x + bw) / w, 6),
-                round((y + bh) / h, 6),
-            )
-            changed = True
-            red_px, blue_px = sample_counts(cfg, img)[zone.name]
-            print(f"  {zone.name}: rect={zone.rect}  (this frame: red={red_px} blue={blue_px})")
-        else:
-            print(f"  {zone.name}: unchanged")
-
-    cv2.destroyAllWindows()
-    return changed
 
 
 def edit_drums(cfg, img: np.ndarray) -> bool:

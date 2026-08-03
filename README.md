@@ -124,16 +124,35 @@ Then:
    the window is letterboxed. Zone rects are fractions of the phone screen, so a
    uniformly scaled window needs no other changes.
 
-4. Place the zones by dragging boxes:
+4. Place the zones. The editor is live by default — it re-grabs the window every
+   frame, so you can **drag boxes around while the song is playing** and watch
+   the counts move against real notes:
 
    ```bash
    python -m vocalbot.cli calibrate zones
    python -m vocalbot.cli calibrate drums
    ```
 
-   Both accept `--image shot.png` to calibrate against a saved screenshot instead
-   of a live grab, and `--only red blue` to edit a subset. Each writes
-   `calibration.png` showing every box with its live counts.
+   | | |
+   |---|---|
+   | drag inside a box | move it |
+   | drag a handle | resize (8 handles: corners and edges) |
+   | `TAB` | select the next zone |
+   | arrows | nudge 1px |
+   | `[` `]` | shrink / grow around the centre |
+   | `+` `-` | adjust the thresholds this zone actually uses |
+   | `m` / `t` | cycle match rule / tapped drums |
+   | `n` / `x` | new zone / delete zone |
+   | `e` | enable or disable |
+   | `s` / `q` | save / quit |
+
+   The status bar shows the selected zone's live counts against its thresholds
+   and flags unsaved changes. Pass `--image shot.png` to edit against a saved
+   screenshot instead — useful before the Mac side is set up. Both commands write
+   `calibration.png` showing every box with its counts.
+
+   The three lane zones share one box on purpose, so `TAB` is how you reach the
+   one underneath.
 
 5. Check the signal without tapping anything:
 
@@ -217,12 +236,13 @@ vocalbot/
   color.py      LUT construction, the hot classify path, per-box fan-out
   scanner.py    per-zone edge state and priority resolution
   capture.py    zone capture (union / per-zone) and mirror-window lookup
-  calibrate.py  overlay rendering and the interactive box/drum editors
+  calibrate.py  overlay rendering, count reports, the drum picker
+  editor.py     draggable/resizable box editor (logic split from the GUI)
   tap.py        threaded tap dispatch via CGEventPost
   bot.py        the live loop
   tune.py       offline blob-tracker reference and parameter sweep
   cli.py        calibrate | zone | bench | probe | tune | run
-tests/          26 regression tests against the four reference frames
+tests/          53 tests: detection against the reference frames, editor geometry
 assets/frames/  the reference screenshots, with known-correct answers
 ```
 

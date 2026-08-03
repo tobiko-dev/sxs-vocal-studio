@@ -1,7 +1,7 @@
 """Command line entry point.
 
     vocalbot calibrate window        pin the mirroring window, save its rect
-    vocalbot calibrate zones         drag the detection boxes
+    vocalbot calibrate zones         drag/resize the detection boxes (live)
     vocalbot calibrate drums         click the two drum targets
     vocalbot zone list|set|add|rm    edit zones without a GUI
     vocalbot probe                   live per-zone counts, no tapping
@@ -49,7 +49,7 @@ def _frame(cfg, image: str | None):
 def cmd_calibrate(args) -> int:
     import cv2
 
-    from .calibrate import edit_drums, edit_zones, render_overlay, report, sample_counts
+    from .calibrate import edit_drums, render_overlay, report, sample_counts
 
     cfg = _load(args.config)
 
@@ -74,20 +74,34 @@ def cmd_calibrate(args) -> int:
         print(f"saved to {args.config}")
         return 0
 
-    img = _frame(cfg, args.image)
-    changed = False
     if args.what == "zones":
-        changed = edit_zones(cfg, img, only=args.only)
-    elif args.what == "drums":
-        changed = edit_drums(cfg, img)
+        from .editor import run_editor
+
+        # A callable, not a frame: with no --image this re-grabs every loop, so
+        # counts move as the song plays and boxes can be placed against real
+        # notes instead of a frozen still.
+        if args.image:
+            img = _frame(cfg, args.image)
+            source = lambda: img  # noqa: E731
+        else:
+            from .capture import grab_window
+
+            if cfg.window_rect is None:
+                raise SystemExit("no window_rect - run `calibrate window`, or pass --image")
+            source = lambda: grab_window(cfg)  # noqa: E731
+
+        run_editor(cfg, source, args.config)
+        img = source()
+    else:
+        img = _frame(cfg, args.image)
+        if edit_drums(cfg, img):
+            cfg.save(args.config)
+            print(f"saved to {args.config}")
 
     print()
     print(report(cfg, img))
     cv2.imwrite(args.out, render_overlay(cfg, img, counts=sample_counts(cfg, img)))
     print(f"\nwrote {args.out}")
-    if changed:
-        cfg.save(args.config)
-        print(f"saved to {args.config}")
     return 0
 
 
@@ -304,7 +318,6 @@ def main(argv=None) -> int:
     c = sub.add_parser("calibrate", help="place the window, zones and drums")
     c.add_argument("what", choices=("window", "zones", "drums"))
     c.add_argument("--image", help="calibrate against a saved screenshot instead of a live grab")
-    c.add_argument("--only", nargs="*", help="limit zone editing to these names")
     c.add_argument("--out", default="calibration.png")
     c.add_argument("--chrome", type=int, default=0, help="title bar px to trim (window only)")
     c.set_defaults(func=cmd_calibrate)
