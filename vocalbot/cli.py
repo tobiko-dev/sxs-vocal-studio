@@ -408,6 +408,53 @@ def cmd_run(args) -> int:
 
 
 # --------------------------------------------------------------------------
+REQUIRED = {
+    "cv2": "opencv-python",
+    "numpy": "numpy",
+    "mss": "mss",
+}
+
+
+def check_deps() -> list[str]:
+    """Names of missing third-party packages, in pip terms."""
+    import importlib.util
+
+    return [
+        pkg for mod, pkg in REQUIRED.items() if importlib.util.find_spec(mod) is None
+    ]
+
+
+def _dependency_help(missing: list[str]) -> str:
+    venv = Path(__file__).resolve().parent.parent / ".venv"
+    lines = [
+        "",
+        f"Missing: {', '.join(missing)}",
+        "",
+        f"Running on Python {sys.version_info.major}.{sys.version_info.minor} "
+        f"at {sys.executable}",
+    ]
+    if venv.is_dir() and str(venv) not in sys.executable:
+        # Much the most common cause: a shell that lost the virtualenv.
+        lines += [
+            "",
+            "There is a .venv here but you are not in it. Activate it:",
+            "",
+            "    source .venv/bin/activate",
+            "    python -m vocalbot.cli run",
+        ]
+    else:
+        lines += [
+            "",
+            "Set up the environment:",
+            "",
+            "    python3 -m venv .venv",
+            "    source .venv/bin/activate",
+            "    pip install -r requirements.txt",
+        ]
+    lines += ["", "(the package for `import cv2` is opencv-python, not cv2)", ""]
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="vocalbot", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -468,6 +515,12 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     if args.cmd == "zone" and args.action != "list" and not args.name:
         p.error(f"zone {args.action} needs a zone name")
+
+    missing = check_deps()
+    if missing:
+        print(_dependency_help(missing), file=sys.stderr)
+        return 1
+
     return args.func(args)
 
 

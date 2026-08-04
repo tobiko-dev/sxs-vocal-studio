@@ -120,8 +120,20 @@ Requires macOS Sequoia or later, an Apple silicon Mac, and iOS 18+ — that's wh
 iPhone Mirroring needs.
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+**Activate the venv in every new shell** before running anything:
+
+```bash
+source .venv/bin/activate
+```
+
+Without it, `python3` on macOS is the system/Xcode build, which has none of
+these packages. The CLI detects that and says so rather than raising
+`ModuleNotFoundError`.
 
 Grant both permissions in **System Settings → Privacy & Security**:
 
@@ -276,6 +288,19 @@ Replay verifies each note is seen once and read correctly; it cannot measure how
 fast the bot will go, because the queue only advances when someone taps.
 
 ## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'cv2'`
+
+The virtualenv isn't active. Your prompt loses its `.venv` marker and `python3`
+falls back to the system build:
+
+```bash
+source .venv/bin/activate
+python -m vocalbot.cli run
+```
+
+Note the pip package for `import cv2` is **opencv-python** — `pip install cv2`
+installs something unrelated.
 
 ### The calibrator shows my desktop / wallpaper, not the phone
 
