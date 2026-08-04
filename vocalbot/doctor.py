@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .capture import PHONE_ASPECT, list_windows, mirror_candidates
+from .capture import PHONE_ASPECT, activate_mirror_app, list_windows, mirror_candidates
 
 
 def _aspect_note(w: int, h: int) -> str:
@@ -89,6 +89,11 @@ def _looks_like_wallpaper(img) -> bool:
 def run(cfg, out_dir: str = ".") -> int:
     out = Path(out_dir)
     problems: list[str] = []
+
+    # Diagnosing a window that is behind the terminal, and therefore possibly
+    # frozen, would describe the wrong thing entirely.
+    if activate_mirror_app():
+        print("brought iPhone Mirroring to the front\n")
 
     print("=" * 68)
     print("1. iPhone Mirroring window")
@@ -186,9 +191,15 @@ def run(cfg, out_dir: str = ".") -> int:
             print(f"  - {p}")
         print()
         print("Most likely fix:")
-        print("  1. Open iPhone Mirroring and start the song")
+        print("  1. Open iPhone Mirroring and start the song PLAYING (not paused)")
         print("  2. python -m vocalbot.cli calibrate window")
         print("  3. python -m vocalbot.cli doctor        (confirm doctor-capture.png)")
+        print()
+        print("If detection keeps reporting that nothing moved: the window stops")
+        print("animating while it is in the background, which is its state when you")
+        print("type a command. Both commands raise it first, but if that is blocked,")
+        print("set the rect by hand instead:")
+        print("  python -m vocalbot.cli calibrate window --rect X,Y,WIDTH,HEIGHT")
         return 1
     print("No problems found.")
     return 0

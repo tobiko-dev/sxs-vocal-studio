@@ -129,6 +129,31 @@ def find_mirror_window() -> tuple[int, int, int, int] | None:
     return cands[0]["rect"] if cands else None
 
 
+def activate_mirror_app(delay: float = 0.6) -> bool:
+    """Bring iPhone Mirroring to the front.
+
+    Running a command from a terminal necessarily takes focus away from the
+    mirroring window, and an unfocused window may stop animating - which is
+    exactly when calibration is being run. Raising it first avoids diagnosing a
+    frozen picture.
+    """
+    import subprocess
+    import time
+
+    for name in MIRROR_APP_NAMES:
+        try:
+            res = subprocess.run(
+                ["osascript", "-e", f'tell application "{name}" to activate'],
+                capture_output=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if res.returncode == 0:
+            time.sleep(delay)
+            return True
+    return False
+
+
 def detect_content_rect(grab, samples: int = 5, delay: float = 0.06,
                         pad: int = 2) -> tuple[int, int, int, int] | None:
     """Find the live phone screen inside a window grab, by what moves.

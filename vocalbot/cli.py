@@ -75,20 +75,38 @@ def cmd_calibrate(args) -> int:
             y, h = y + args.chrome, h - args.chrome
             print(f"trimmed {args.chrome}px -> ({x}, {y}) {w}x{h}  aspect {w / h:.4f}")
 
-        if not args.no_auto:
+        if args.rect:
+            x, y, w, h = _parse_int_rect(args.rect)
+            print(f"using --rect ({x}, {y}) {w}x{h}  aspect {w / h:.4f}")
+        elif not args.no_auto:
             # The window is drawn as a phone body with rounded corners and a
             # shadow, so its bounds include margin that isn't screen content.
             # There's no title bar to trim and no fixed inset to guess, so find
             # the live screen by what moves instead.
-            from .capture import MSSCapture, detect_content_rect, snap_to_phone_aspect
+            from .capture import (
+                MSSCapture,
+                activate_mirror_app,
+                detect_content_rect,
+                snap_to_phone_aspect,
+            )
+
+            # Running this from a terminal necessarily takes focus off the
+            # mirroring window, and an unfocused window stops animating - which
+            # is exactly when detection runs. Raise it first.
+            if activate_mirror_app():
+                print("brought iPhone Mirroring to the front")
+            else:
+                print("could not activate iPhone Mirroring - click it yourself, then retry")
 
             print("detecting the screen inside the window (needs the song playing)...")
             cap = MSSCapture((x, y, w, h))
             inner = detect_content_rect(cap.grab)
             cap.close()
             if inner is None:
-                print("  nothing moved - is the song running? keeping the window bounds.")
-                print("  re-run while the game is animating, or pass --no-auto.")
+                print("  nothing moved. The song must be RUNNING, not paused, and the")
+                print("  mirroring window must be in front. Keeping the window bounds.")
+                print("  Options: re-run with the song playing, pass --no-auto to accept")
+                print("  these bounds, or set it by hand with --rect x,y,w,h.")
             else:
                 ix, iy, iw, ih = snap_to_phone_aspect(inner)
                 x, y, w, h = x + ix, y + iy, iw, ih
@@ -228,6 +246,13 @@ def cmd_zone(args) -> int:
           f"thresh={zone.thresh_red}/{zone.thresh_blue} prio={zone.priority} "
           f"rect={tuple(round(v, 4) for v in zone.rect)} enabled={zone.enabled}")
     return 0
+
+
+def _parse_int_rect(text: str) -> tuple[int, int, int, int]:
+    parts = [int(float(p)) for p in text.replace(" ", "").split(",")]
+    if len(parts) != 4:
+        raise SystemExit("--rect wants x,y,width,height in screen points")
+    return tuple(parts)
 
 
 def _parse_rect(text: str) -> tuple[float, float, float, float]:
@@ -374,6 +399,7 @@ def main(argv=None) -> int:
                    help="px to trim off the top before auto-detection (rarely needed)")
     c.add_argument("--no-auto", action="store_true",
                    help="skip motion-based content detection, use raw window bounds")
+    c.add_argument("--rect", help="set the content rect by hand: x,y,width,height")
     c.set_defaults(func=cmd_calibrate)
 
     z = sub.add_parser("zone", help="inspect or edit zones without a GUI")

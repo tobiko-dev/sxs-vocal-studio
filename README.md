@@ -139,18 +139,23 @@ Then:
    python -m vocalbot.cli calibrate window
    ```
 
-   **Have the song playing when you run this.** The mirroring window has no
-   title bar — it's drawn as a phone body with rounded corners and a shadow, so
-   its bounds include margin that isn't screen content, and the padding varies
-   with window size. Rather than guess an inset, the command finds the live
-   screen by *what moves*: the game animates continuously, the desktop behind
-   the window's margin doesn't. Differencing a few frames gives the content rect
-   directly.
+   **Leave the song playing.** The mirroring window has no title bar — it's
+   drawn as a phone body with rounded corners and a shadow, so its bounds
+   include margin that isn't screen content, and the padding varies with window
+   size. Rather than guess an inset, the command finds the live screen by *what
+   moves*: the game animates continuously, the desktop behind the window's
+   margin doesn't. Differencing a few frames gives the content rect directly.
+
+   Typing a command necessarily puts your terminal in front, and the mirroring
+   window stops animating in the background — which is precisely when detection
+   runs. So the command **raises iPhone Mirroring first**, waits for it to
+   resume, then measures.
 
    It then prints the content aspect, which should land near **0.4600**, and the
-   drum coverage, which should read 60–70% at both. If the game is paused,
-   detection reports that nothing moved and falls back to the raw window bounds;
-   pass `--no-auto` to skip detection entirely.
+   drum coverage, which should read 60–70% at both. If nothing moved, it says so
+   and keeps the raw window bounds rather than inventing a rect. Escape hatches:
+   `--no-auto` accepts the window bounds as-is, `--rect x,y,w,h` sets the
+   content rect by hand.
 
 4. Place the boxes. The editor is live — it re-grabs every frame, so you can
    **drag boxes while the song plays** and watch the counts move against real
@@ -236,8 +241,10 @@ being grabbed. Usual causes:
   and captures a phone-shaped patch of desktop.
 - **The window moved after calibration.** Coordinates are pinned; re-run
   `calibrate window`.
-- **Calibrated while the game was paused.** Content detection needs motion. Run
-  it with the song playing.
+- **Calibrated while the game was paused, or while the window was behind the
+  terminal.** Content detection needs motion, and the window stops animating in
+  the background. Both `calibrate window` and `doctor` raise it first; if that's
+  blocked, use `--rect x,y,w,h`.
 - **The wrong window was picked.** The app owns several windows, and a helper
   or menu-bar one can match first. `doctor` lists all candidates; the largest
   normal-layer window is the one used.
