@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import time
 
-from .capture import MSSCapture, ZoneCapture
+from .capture import MSSCapture, ZoneCapture, cursor_pos
+from .failsafe import Failsafe
 from .color import build_lut, classify, fan_out, signature, sig_diff
 from .palette import count_matches, decide_taps
 from .queuescan import QueueScanner
@@ -33,10 +34,15 @@ class SampledBot:
         self.capture = MSSCapture(cfg.sample_rect)
         self.tapper = make_tapper(dry_run)
         self.worker = TapWorker(cfg, self.tapper, screen_points=True)
+        self.failsafe = Failsafe(
+            drum_points=[cfg.drum_screen_point(d) for d in ("red", "blue")],
+            duration=cfg.max_run_seconds,
+        )
         self.frames = 0
         self.loop_ms_total = 0.0
         self.notes = 0
         self.retries = 0
+        self._hold_until = 0.0
         # Advance detection, unchanged: colour alone can't tell you the queue
         # moved, because consecutive notes are often the same colour.
         self._prev_sig = None
@@ -60,12 +66,19 @@ class SampledBot:
         if not taps or self._settled < self.cfg.settle_frames:
             return None, counts
 
+        # After a tap the queue animates the next note in. Reading during that
+        # gives a half-drawn bubble, which is where a lot of wrong presses come
+        # from, so hold off until the art has had time to land.
+        if t < self._hold_until:
+            return None, counts
+
         changed = sig_diff(self._last_sig, sig) > self.cfg.sig_change
         stale = (t - self._last_t) * 1000.0 > self.cfg.retry_ms
         if not (changed or stale):
             return None, counts
 
         self._last_sig, self._last_t = sig, t
+        self._hold_until = t + self.cfg.post_tap_ms / 1000.0
         self.notes += 1
         if not changed:
             self.retries += 1
@@ -102,6 +115,7 @@ class SampledBot:
             self.worker.stop()
             self.capture.close()
             wall = time.perf_counter() - t0
+            print(f"\nstopped: {self.failsafe.reason or 'finished'}")
             if self.frames:
                 print(f"\n{self.frames} frames in {wall:.1f}s "
                       f"({self.frames / max(wall, 1e-9):.0f} fps, "

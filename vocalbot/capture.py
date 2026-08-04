@@ -129,6 +129,16 @@ def find_mirror_window() -> tuple[int, int, int, int] | None:
     return cands[0]["rect"] if cands else None
 
 
+def cursor_pos():
+    """Current cursor position, or None without Quartz. Needs no permission."""
+    try:
+        import Quartz
+    except ImportError:
+        return None
+    loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+    return int(loc.x), int(loc.y)
+
+
 def activate_mirror_app(delay: float = 0.6) -> bool:
     """Bring iPhone Mirroring to the front.
 

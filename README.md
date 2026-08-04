@@ -202,6 +202,30 @@ The older `calibrate` / `zone` / `doctor` commands still work and still drive th
 zone-based detector, which is what `replay` uses to check against a recording.
 `run` uses the sampled palette once setup has been done.
 
+## Stopping it
+
+**Move the mouse away from the drums.** That is the way out, and it acts within
+about a third of a second.
+
+This matters more than it sounds. While playing, the bot clicks the mirroring
+window many times a second, which takes focus — so your keystrokes are going to
+the phone, not the terminal, and Ctrl-C can be genuinely hard to land. Reading
+the cursor position needs no permission, so this check cannot silently fail the
+way a hotkey can.
+
+Backstops, in order of how fast they act:
+
+| | |
+|---|---|
+| move the mouse | ~0.3s |
+| wall-clock limit | `max_run_seconds`, default 150s — `--duration 0` removes it |
+| Ctrl-C / SIGTERM | when the terminal is reachable |
+| tap thread | daemon, and joined on exit, so nothing keeps clicking |
+
+The bot only ever parks the cursor on one of the two drums, so a cursor
+anywhere else means you took over. A single stray reading won't end a run — the
+cursor has to stay away for the grace period.
+
 ## Validating against a recording
 
 ```bash

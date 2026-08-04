@@ -389,7 +389,10 @@ def cmd_run(args) -> int:
                 print(f"\rstarting in {i}...", end="", flush=True)
                 time.sleep(1)
             print()
-        SampledBot(cfg, dry_run=args.dry_run, verbose=not args.quiet).run(args.duration)
+        duration = cfg.max_run_seconds if args.duration is None else args.duration
+        if duration == 0:
+            duration = None
+        SampledBot(cfg, dry_run=args.dry_run, verbose=not args.quiet).run(duration)
         return 0
 
     if cfg.window_rect is None:
@@ -455,7 +458,8 @@ def main(argv=None) -> int:
 
     r = sub.add_parser("run", help="play")
     r.add_argument("--dry-run", action="store_true", help="detect but never tap")
-    r.add_argument("--duration", type=float, default=None)
+    r.add_argument("--duration", type=float, default=None,
+                   help="seconds before stopping (default 150; 0 for no limit)")
     r.add_argument("--countdown", type=int, default=3)
     r.add_argument("--quiet", action="store_true")
     r.add_argument("--setup", action="store_true", help="re-run guided setup")

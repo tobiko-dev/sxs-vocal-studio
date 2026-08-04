@@ -193,6 +193,13 @@ class Config:
     # The front slot is static between notes, so a tap is triggered by the slot
     # changing rather than by a note arriving. Measured on the recording:
     # 87% of frames sit under 3.0 (settled), 9% sit over 6.0 (mid-animation).
+    # After a tap the queue animates the next note in; reading mid-animation is
+    # a common source of wrong presses, so hold off before trusting the box.
+    post_tap_ms: float = 140.0
+    # Wall-clock limit so an unattended run cannot go on forever. The primary
+    # way to stop is moving the mouse; this is a backstop.
+    max_run_seconds: float | None = 150.0
+
     sig_stable: float = 3.0  # frame-to-frame diff counting as "not moving"
     sig_change: float = 6.0  # diff from the last tap counting as "new note"
     settle_frames: int = 3  # frames of stillness before trusting a read
