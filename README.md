@@ -125,83 +125,69 @@ pip install -r requirements.txt
 
 Grant both permissions in **System Settings → Privacy & Security**:
 
-- **Screen Recording** — for your terminal, to capture the box
-- **Accessibility** — for your terminal, to post synthetic clicks
+- **Screen Recording** — for your terminal, to read the screen
+- **Accessibility** — for your terminal, to click and to watch for your clicks
 
-Then:
+Then there is one command:
 
-1. Open iPhone Mirroring and **leave the window where it is**. Coordinates are
-   relative to a pinned window rect; move it and you must recalibrate.
-2. Start the song so the playfield is on screen.
-3. Pin the window:
+```bash
+python -m vocalbot.cli run
+```
 
-   ```bash
-   python -m vocalbot.cli calibrate window
-   ```
+The first run walks you through setup, one prompt at a time. Put the terminal
+beside the phone window so you can read as you click. It raises iPhone
+Mirroring, waits for you to press **`e`** when you're ready, then asks you to
+click, in order:
 
-   **Leave the song playing.** The mirroring window has no title bar — it's
-   drawn as a phone body with rounded corners and a shadow, so its bounds
-   include margin that isn't screen content, and the padding varies with window
-   size. Rather than guess an inset, the command finds the live screen by *what
-   moves*: the game animates continuously, the desktop behind the window's
-   margin doesn't. Differencing a few frames gives the content rect directly.
+| | |
+|---|---|
+| the **blue drum** | records where to press it |
+| the **red drum** | records where to press it |
+| the **vivid core of a blue note** | records what blue looks like on your screen |
+| the **vivid core of a red note** | records what red looks like |
+| a white "both" marker | optional — `s` skips |
+| the purple of the disco ball | optional — `s` skips |
 
-   Typing a command necessarily puts your terminal in front, and the mirroring
-   window stops animating in the background — which is precisely when detection
-   runs. So the command **raises iPhone Mirroring first**, waits for it to
-   resume, then measures.
+`q` quits at any point. Clicks land on the phone, so pressing the drums really
+does press them — that's expected and harmless.
 
-   It then prints the content aspect, which should land near **0.4600**, and the
-   drum coverage, which should read 60–70% at both. If nothing moved, it says so
-   and keeps the raw window bounds rather than inventing a rect. Escape hatches:
-   `--no-auto` accepts the window bounds as-is, `--rect x,y,w,h` sets the
-   content rect by hand.
+Then it shows a **live readout** of what it sees. Watch it against the game: a
+blue note should read blue, a red note red, a pair both. Press `e` to start
+playing when it looks right, or `q` to bail and re-run.
 
-4. Place the boxes. The editor is live — it re-grabs every frame, so you can
-   **drag boxes while the song plays** and watch the counts move against real
-   notes:
+Re-run setup any time with `run --setup`. Do that whenever the mirroring window
+moves, since the coordinates are absolute.
 
-   ```bash
-   python -m vocalbot.cli calibrate zones
-   python -m vocalbot.cli calibrate drums
-   ```
+### Why setup asks for the *vivid* part, not the darkest
 
-   | | |
-   |---|---|
-   | drag inside a box | move it |
-   | drag a handle | resize (8 handles) |
-   | `TAB` | select the next zone |
-   | arrows | nudge 1px |
-   | `[` `]` | shrink / grow around the centre |
-   | `+` `-` | adjust the thresholds this zone uses |
-   | `m` / `t` | cycle match rule / tapped drums |
-   | `n` / `x` | new zone / delete zone |
-   | `e` | enable or disable |
-   | `s` / `q` | save / quit |
+Measured on the reference frames: the shadowed cores of the blue and red notes
+are only **52 apart** in colour, while their vivid cores are **246 apart**. A
+sample taken from a dark area makes the two notes indistinguishable. Sampling
+also keys off the most strongly coloured pixels near your click rather than
+averaging the patch, so clipping the edge of a note still yields the note's
+colour instead of the pale bubble's — verified exact with the note covering as
+little as 7% of the click.
 
-   All four zones share one box, so `TAB` is how you reach the ones underneath.
-   Pass `--image shot.png` to edit against a saved screenshot instead.
+The same reasoning is why a washed-out sample gets a warning: a pale colour
+matches the bubbles and the background too, which causes phantom presses. That
+is also the honest caveat on the disco step — the ball's purple is pastel, and
+on the reference frames a disco sample produced 426 false matches on a frame
+with no ball. Skipping it is usually better, since the ball reads as blue on
+its own.
 
-   If anything looks wrong, run the diagnostic before touching thresholds:
+### What setup removes
 
-   ```bash
-   python -m vocalbot.cli doctor
-   ```
+Two things kept going wrong before, and both are gone:
 
-   See [Troubleshooting](#troubleshooting).
+- **No window rect.** Drum positions are absolute screen coordinates from your
+  clicks, so nothing has to work out where the phone screen sits inside the
+  mirroring window — a window with no title bar, variable padding, and a shadow.
+- **No colour thresholds.** The colours come from your display rather than from
+  reference screenshots, so nothing has to be guessed in advance or re-tuned.
 
-5. Check the signal without tapping:
-
-   ```bash
-   python -m vocalbot.cli probe
-   ```
-
-6. Dry run, then for real:
-
-   ```bash
-   python -m vocalbot.cli run --dry-run
-   python -m vocalbot.cli run
-   ```
+The older `calibrate` / `zone` / `doctor` commands still work and still drive the
+zone-based detector, which is what `replay` uses to check against a recording.
+`run` uses the sampled palette once setup has been done.
 
 ## Validating against a recording
 
@@ -307,10 +293,12 @@ vocalbot/
   editor.py     draggable/resizable box editor (logic split from the GUI)
   tap.py        threaded tap dispatch via CGEventPost
   bot.py        the live loop
+  wizard.py     guided setup: global click/key watching, colour sampling
+  palette.py    matching against clicked colours, and the press-both fallback
   replay.py     offline replay of the live decision path over a recording
   doctor.py     capture diagnostics: which window, what is actually grabbed
-  cli.py        calibrate | zone | doctor | bench | probe | replay | run
-tests/          85 tests: detection, queue scanner, editor geometry, diagnostics
+  cli.py        run | calibrate | zone | doctor | bench | probe | replay
+tests/          110 tests: palette, queue scanner, editor, detection, diagnostics
 assets/frames/  reference screenshots with known-correct answers
 ```
 

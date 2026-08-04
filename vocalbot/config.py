@@ -22,6 +22,12 @@ MATCHES = ("red", "blue", "both", "any")
 DRUMS = ("red", "blue")
 
 
+def _empty_palette():
+    from .palette import Palette
+
+    return Palette()
+
+
 def _f(px: float, ref: int) -> float:
     return round(px / ref, 6)
 
@@ -204,8 +210,18 @@ class Config:
     )
 
     # --- drum tap targets, as fractions of the phone screen -------------------
+    # Used by the diagnostics and the reference frames. The guided setup records
+    # absolute screen points in `drum_points` instead, which needs no window
+    # rect at all.
     drum_red: tuple[float, float] = (0.809, 0.802)
     drum_blue: tuple[float, float] = (0.185, 0.802)
+
+    # --- guided setup results -------------------------------------------------
+    # Absolute screen coordinates, learned from where you clicked. Nothing here
+    # depends on knowing the mirroring window's bounds.
+    drum_points: dict = field(default_factory=dict)  # {"red": (x, y), "blue": ...}
+    sample_rect: tuple[int, int, int, int] | None = None  # region to watch
+    palette: "Palette" = field(default_factory=lambda: _empty_palette())
 
     # --- input ----------------------------------------------------------------
     tap_hold_ms: float = 12.0
@@ -230,6 +246,22 @@ class Config:
 
     def drum(self, color: str) -> tuple[float, float]:
         return self.drum_red if color == "red" else self.drum_blue
+
+    def is_setup(self) -> bool:
+        """True when the guided setup has recorded everything needed to play."""
+        return (
+            self.sample_rect is not None
+            and bool(self.drum_points.get("red"))
+            and bool(self.drum_points.get("blue"))
+            and self.palette.is_ready()
+        )
+
+    def drum_screen_point(self, color: str) -> tuple[int, int]:
+        """Where to click for one drum, in absolute screen coordinates."""
+        point = self.drum_points.get(color)
+        if point:
+            return int(point[0]), int(point[1])
+        return self.drum_point(color)  # fall back to the window-relative path
 
     def active_zones(self) -> list[Zone]:
         """Enabled zones, highest priority first."""
@@ -293,7 +325,25 @@ class Config:
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
+        from .palette import Palette, Sample
+
         raw = json.loads(Path(path).read_text())
+        if isinstance(raw.get("palette"), dict):
+            pal = dict(raw["palette"])
+            pal["samples"] = [
+                Sample(
+                    name=s["name"],
+                    rgb=tuple(s["rgb"]),
+                    taps=tuple(s["taps"]),
+                    point=tuple(s["point"]) if s.get("point") else None,
+                )
+                for s in pal.get("samples", [])
+            ]
+            raw["palette"] = Palette(**pal)
+        if isinstance(raw.get("sample_rect"), list):
+            raw["sample_rect"] = tuple(raw["sample_rect"])
+        if isinstance(raw.get("drum_points"), dict):
+            raw["drum_points"] = {k: tuple(v) for k, v in raw["drum_points"].items()}
         for key in ("red", "blue"):
             if isinstance(raw.get(key), dict):
                 raw[key] = ColorRule(**raw[key])

@@ -11,10 +11,103 @@ from __future__ import annotations
 
 import time
 
-from .capture import ZoneCapture
-from .color import build_lut, classify, fan_out, signature
+from .capture import MSSCapture, ZoneCapture
+from .color import build_lut, classify, fan_out, signature, sig_diff
+from .palette import count_matches, decide_taps
 from .queuescan import QueueScanner
 from .tap import TapWorker, make_tapper
+
+
+class SampledBot:
+    """The bot as driven by the guided setup.
+
+    Reads one screen region, matches every pixel to the colours you clicked, and
+    presses the drums at the points you clicked. Nothing here needs the mirroring
+    window's bounds, a fractional layout, or a colour threshold - all of it came
+    from calibration.
+    """
+
+    def __init__(self, cfg, dry_run: bool = False, verbose: bool = False):
+        self.cfg = cfg
+        self.verbose = verbose
+        self.capture = MSSCapture(cfg.sample_rect)
+        self.tapper = make_tapper(dry_run)
+        self.worker = TapWorker(cfg, self.tapper, screen_points=True)
+        self.frames = 0
+        self.loop_ms_total = 0.0
+        self.notes = 0
+        self.retries = 0
+        # Advance detection, unchanged: colour alone can't tell you the queue
+        # moved, because consecutive notes are often the same colour.
+        self._prev_sig = None
+        self._prev_taps = None
+        self._settled = 0
+        self._last_sig = None
+        self._last_t = -1e9
+
+    def step(self, frame, t):
+        counts = count_matches(frame, self.cfg.palette, self.cfg.step)
+        taps = tuple(decide_taps(counts, self.cfg.palette, self.cfg.tap_order))
+        sig = signature(frame)
+
+        quiet = sig_diff(self._prev_sig, sig) <= self.cfg.sig_stable
+        if quiet and taps == self._prev_taps:
+            self._settled += 1
+        else:
+            self._settled = 0
+        self._prev_sig, self._prev_taps = sig, taps
+
+        if not taps or self._settled < self.cfg.settle_frames:
+            return None, counts
+
+        changed = sig_diff(self._last_sig, sig) > self.cfg.sig_change
+        stale = (t - self._last_t) * 1000.0 > self.cfg.retry_ms
+        if not (changed or stale):
+            return None, counts
+
+        self._last_sig, self._last_t = sig, t
+        self.notes += 1
+        if not changed:
+            self.retries += 1
+        return (taps, "advance" if changed else "retry"), counts
+
+    def run(self, duration: float | None = None) -> None:
+        self.worker.start()
+        budget = 1.0 / self.cfg.target_fps
+        t0 = time.perf_counter()
+        print("playing - ctrl-c to stop\n")
+        try:
+            while True:
+                frame_start = time.perf_counter()
+                if duration is not None and frame_start - t0 >= duration:
+                    break
+                fired, counts = self.step(self.capture.grab(), frame_start)
+                if fired:
+                    taps, reason = fired
+                    self.worker.submit(list(taps))
+                    if self.verbose:
+                        seen = " ".join(
+                            f"{k}={v}" for k, v in counts.items() if k != "background" and v
+                        )
+                        print(f"[{frame_start - t0:7.3f}s] {'+'.join(taps):<9s} "
+                              f"({reason})  {seen}")
+                self.frames += 1
+                elapsed = time.perf_counter() - frame_start
+                self.loop_ms_total += elapsed * 1000.0
+                if elapsed < budget:
+                    time.sleep(budget - elapsed)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.worker.stop()
+            self.capture.close()
+            wall = time.perf_counter() - t0
+            if self.frames:
+                print(f"\n{self.frames} frames in {wall:.1f}s "
+                      f"({self.frames / max(wall, 1e-9):.0f} fps, "
+                      f"{self.loop_ms_total / self.frames:.2f} ms/frame)")
+                print(f"notes={self.notes}  retries={self.retries}  "
+                      f"taps={self.worker.dispatched}  dropped={self.worker.dropped}")
 
 
 class Bot:

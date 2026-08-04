@@ -51,9 +51,12 @@ class DryRunTapper:
 class TapWorker:
     """Serialises taps onto a background thread."""
 
-    def __init__(self, cfg, tapper):
+    def __init__(self, cfg, tapper, screen_points: bool = False):
         self.cfg = cfg
         self.tapper = tapper
+        # The guided setup records absolute screen coordinates, so no window
+        # rect is needed to work out where a drum is.
+        self.screen_points = screen_points
         self._q: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="tap-worker")
@@ -83,7 +86,11 @@ class TapWorker:
             for i, color in enumerate(colors):
                 if i:
                     time.sleep(gap)
-                x, y = self.cfg.drum_point(color)
+                x, y = (
+                    self.cfg.drum_screen_point(color)
+                    if self.screen_points
+                    else self.cfg.drum_point(color)
+                )
                 self.tapper.click(x, y, hold)
                 self.dispatched += 1
 

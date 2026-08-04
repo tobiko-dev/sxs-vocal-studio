@@ -369,9 +369,29 @@ def cmd_replay(args) -> int:
 
 
 def cmd_run(args) -> int:
-    from .bot import Bot
+    from .bot import Bot, SampledBot
+    from .wizard import run_setup
 
     cfg = _load(args.config)
+
+    # Guided setup runs automatically the first time, so `run` is the only
+    # command anyone needs to know.
+    if args.setup or not cfg.is_setup():
+        if not cfg.is_setup() and not args.setup:
+            print("Not set up yet - starting guided setup.")
+        if not run_setup(cfg, args.config):
+            return 1
+        cfg = _load(args.config)
+
+    if cfg.is_setup():
+        if args.countdown:
+            for i in range(args.countdown, 0, -1):
+                print(f"\rstarting in {i}...", end="", flush=True)
+                time.sleep(1)
+            print()
+        SampledBot(cfg, dry_run=args.dry_run, verbose=not args.quiet).run(args.duration)
+        return 0
+
     if cfg.window_rect is None:
         print("no window_rect - run `vocalbot calibrate window` first", file=sys.stderr)
         return 1
@@ -438,6 +458,7 @@ def main(argv=None) -> int:
     r.add_argument("--duration", type=float, default=None)
     r.add_argument("--countdown", type=int, default=3)
     r.add_argument("--quiet", action="store_true")
+    r.add_argument("--setup", action="store_true", help="re-run guided setup")
     r.set_defaults(func=cmd_run)
 
     args = p.parse_args(argv)
