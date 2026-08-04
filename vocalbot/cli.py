@@ -4,6 +4,7 @@
     vocalbot calibrate zones         drag/resize the detection boxes (live)
     vocalbot calibrate drums         click the two drum targets
     vocalbot zone list|set|add|rm    edit zones without a GUI
+    vocalbot doctor                  diagnose what the capture is pointing at
     vocalbot probe                   live per-zone counts, no tapping
     vocalbot bench                   measure capture and classify cost
     vocalbot replay RECORDING        run the detector over a recording, offline
@@ -61,17 +62,45 @@ def cmd_calibrate(args) -> int:
             print("iPhone Mirroring window not found. Open it, start the song, retry.")
             print('Or set it by hand in the config: "window_rect": [x, y, width, height]')
             return 1
+        from .capture import PHONE_ASPECT, mirror_candidates
+
+        cands = mirror_candidates()
+        if len(cands) > 1:
+            print(f"{len(cands)} candidate windows; using the largest:")
+            for c in cands:
+                print(f"   {c['rect']}  {c['title'] or '(untitled)'}")
         x, y, w, h = rect
         print(f"window at ({x}, {y}) {w}x{h}")
         if args.chrome:
             y, h = y + args.chrome, h - args.chrome
             print(f"trimmed {args.chrome}px of title bar -> ({x}, {y}) {w}x{h}")
+
         aspect = w / h
-        print(f"content aspect {aspect:.4f} (phone is 0.4600) - a big mismatch means")
-        print("the title bar trim is wrong or the window is letterboxed")
+        off = abs(aspect - PHONE_ASPECT) / PHONE_ASPECT
+        print(f"content aspect {aspect:.4f} (phone is {PHONE_ASPECT:.4f})")
+        if off > 0.06:
+            print(f"WARNING: off by {100 * off:.0f}%. The chrome trim is probably wrong,")
+            print("or the window is letterboxed. Zone boxes will not line up.")
+
         cfg.window_rect = (x, y, w, h)
         cfg.save(args.config)
         print(f"saved to {args.config}")
+
+        # Prove it grabbed the phone rather than a patch of desktop. This is the
+        # failure that otherwise shows up much later as a calibrator full of
+        # wallpaper, with nothing pointing at the cause.
+        from .capture import grab_window
+        from .doctor import drum_fill, looks_like_game
+
+        img = grab_window(cfg)
+        cv2.imwrite(args.out, img)
+        print(f"wrote {args.out} - check it shows the phone screen")
+        red_fill, blue_fill = drum_fill(cfg, img)
+        print(f"drum targets: red {100 * red_fill:.0f}% blue {100 * blue_fill:.0f}%")
+        if not looks_like_game(cfg, img):
+            print("\nWARNING: this does not look like the game - the drums are not")
+            print("where they should be. Run `vocalbot doctor` for the diagnosis.")
+            return 1
         return 0
 
     if args.what == "zones":
@@ -103,6 +132,12 @@ def cmd_calibrate(args) -> int:
     cv2.imwrite(args.out, render_overlay(cfg, img, counts=sample_counts(cfg, img)))
     print(f"\nwrote {args.out}")
     return 0
+
+
+def cmd_doctor(args) -> int:
+    from .doctor import run
+
+    return run(_load(args.config))
 
 
 def cmd_zone(args) -> int:
@@ -335,6 +370,9 @@ def main(argv=None) -> int:
     z.add_argument("--disable", action="store_true")
     z.add_argument("--image", help="with `list`, report counts on this screenshot")
     z.set_defaults(func=cmd_zone)
+
+    d = sub.add_parser("doctor", help="diagnose what the capture is pointing at")
+    d.set_defaults(func=cmd_doctor)
 
     b = sub.add_parser("bench", help="measure capture and classify cost")
     b.set_defaults(func=cmd_bench)

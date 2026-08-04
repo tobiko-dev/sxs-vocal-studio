@@ -69,27 +69,63 @@ def open_capture(cfg):
     return MSSCapture(rect)
 
 
-def find_mirror_window() -> tuple[int, int, int, int] | None:
-    """Locate the iPhone Mirroring window. Returns (x, y, w, h) or None.
+PHONE_ASPECT = 1206 / 2622  # 0.4600
+MIN_WINDOW_PX = 200
 
-    The window has a title bar above the mirrored phone content; the returned
-    rect is the full window, so `calibrate` trims the chrome.
-    """
+
+def list_windows() -> list[dict]:
+    """Every on-screen window: owner, title, bounds, layer. [] without Quartz."""
     try:
         import Quartz
     except ImportError:
-        return None
+        return []
 
-    windows = Quartz.CGWindowListCopyWindowInfo(
+    raw = Quartz.CGWindowListCopyWindowInfo(
         Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
         Quartz.kCGNullWindowID,
     )
-    for win in windows or []:
-        owner = win.get("kCGWindowOwnerName", "")
-        if owner in MIRROR_APP_NAMES:
-            b = win["kCGWindowBounds"]
-            return int(b["X"]), int(b["Y"]), int(b["Width"]), int(b["Height"])
-    return None
+    out = []
+    for win in raw or []:
+        b = win.get("kCGWindowBounds") or {}
+        out.append(
+            {
+                "owner": win.get("kCGWindowOwnerName", ""),
+                "title": win.get("kCGWindowName", "") or "",
+                "layer": int(win.get("kCGWindowLayer", 0)),
+                "rect": (int(b.get("X", 0)), int(b.get("Y", 0)),
+                         int(b.get("Width", 0)), int(b.get("Height", 0))),
+            }
+        )
+    return out
+
+
+def mirror_candidates() -> list[dict]:
+    """Plausible iPhone Mirroring windows, largest first.
+
+    The app owns more than one window - menu bar items and helper panels among
+    them - and picking the first match can land on a tiny offscreen one whose
+    bounds capture a patch of desktop instead of the phone. Degenerate sizes are
+    dropped and the largest normal-layer window wins.
+    """
+    cands = []
+    for win in list_windows():
+        if win["owner"] not in MIRROR_APP_NAMES and "iphone mirroring" not in win["title"].lower():
+            continue
+        _, _, w, h = win["rect"]
+        if w < MIN_WINDOW_PX or h < MIN_WINDOW_PX or win["layer"] != 0:
+            continue
+        cands.append(win)
+    return sorted(cands, key=lambda w: -(w["rect"][2] * w["rect"][3]))
+
+
+def find_mirror_window() -> tuple[int, int, int, int] | None:
+    """Locate the iPhone Mirroring window. Returns (x, y, w, h) or None.
+
+    The window is drawn as a phone shape with rounded corners, so the returned
+    rect may include a little chrome; `calibrate window` trims and checks it.
+    """
+    cands = mirror_candidates()
+    return cands[0]["rect"] if cands else None
 
 
 def grab_window(cfg) -> "np.ndarray":

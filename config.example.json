@@ -117,12 +117,7 @@
     "red",
     "blue"
   ],
-  "window_rect": [
-    100,
-    120,
-    420,
-    910
-  ],
+  "window_rect": null,
   "backend": "mss",
   "capture_mode": "union",
   "target_fps": 240

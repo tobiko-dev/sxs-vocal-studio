@@ -168,6 +168,14 @@ Then:
    All four zones share one box, so `TAB` is how you reach the ones underneath.
    Pass `--image shot.png` to edit against a saved screenshot instead.
 
+   If anything looks wrong, run the diagnostic before touching thresholds:
+
+   ```bash
+   python -m vocalbot.cli doctor
+   ```
+
+   See [Troubleshooting](#troubleshooting).
+
 5. Check the signal without tapping:
 
    ```bash
@@ -199,6 +207,42 @@ Note that a recording captures a *human* playing, so the pace in it is theirs.
 Replay verifies each note is seen once and read correctly; it cannot measure how
 fast the bot will go, because the queue only advances when someone taps.
 
+## Troubleshooting
+
+### The calibrator shows my desktop / wallpaper, not the phone
+
+Nothing is broken — the detector is faithfully reading the wrong pixels. The
+saved `window_rect` is pointing somewhere other than the mirroring window.
+
+```bash
+python -m vocalbot.cli doctor
+```
+
+That prints every iPhone Mirroring window it can see, the rect currently saved,
+whether the two disagree, and saves `doctor-capture.png` showing exactly what is
+being grabbed. Usual causes:
+
+- **A placeholder rect was copied from `config.example.json`.** The example now
+  ships `window_rect: null` for this reason; an invented rect looks plausible
+  and captures a phone-shaped patch of desktop.
+- **The window moved after calibration.** Coordinates are pinned; re-run
+  `calibrate window`.
+- **The wrong window was picked.** The app owns several windows, and a helper
+  or menu-bar one can match first. `doctor` lists all candidates; the largest
+  normal-layer window is the one used.
+- **iPhone Mirroring isn't running or is behind another window.**
+
+`calibrate window` and `doctor` both verify the grab by checking that **both
+drums are visible where they should be** — a real game screen shows 60–70%
+coverage at each drum target, versus under 25% for anything else. That is a much
+more specific test than "does this look busy", which a detailed wallpaper passes
+easily.
+
+### Zone labels overlap in the calibrator
+
+Expected: all four zones share one box. Labels are stacked one line per zone,
+and `TAB` cycles which is selected.
+
 ## Editing zones without the GUI
 
 ```bash
@@ -220,7 +264,8 @@ vocalbot zone rm hold
 - **No true multi-touch.** macOS has no public multi-touch injection API, so
   "both drums" is two taps `inter_tap_ms` apart. Hit windows are tens of ms wide
   so this should land; widen it first if doubles drop.
-- **Window must stay pinned.** No continuous window tracking.
+- **Window must stay pinned.** No continuous window tracking; moving the window
+  invalidates the calibration. `doctor` detects the mismatch.
 - **The bot doesn't know when to stop.** It has no notion of a pause, countdown
   or results screen and will keep tapping through them.
 - **Only tap notes are modelled.** If any glyph is a hold or a flick, it needs a
@@ -239,8 +284,9 @@ vocalbot/
   tap.py        threaded tap dispatch via CGEventPost
   bot.py        the live loop
   replay.py     offline replay of the live decision path over a recording
-  cli.py        calibrate | zone | bench | probe | replay | run
-tests/          70 tests: detection, queue scanner, editor geometry
+  doctor.py     capture diagnostics: which window, what is actually grabbed
+  cli.py        calibrate | zone | doctor | bench | probe | replay | run
+tests/          85 tests: detection, queue scanner, editor geometry, diagnostics
 assets/frames/  reference screenshots with known-correct answers
 ```
 

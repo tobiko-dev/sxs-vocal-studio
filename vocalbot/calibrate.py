@@ -34,8 +34,14 @@ def render_overlay(cfg, img: np.ndarray, counts: dict | None = None, active: str
     out = img.copy()
     h, w = out.shape[:2]
 
+    # Zones deliberately share a box, so their labels would print on top of each
+    # other. Stack them instead, one line per zone.
+    rows: dict[tuple, int] = {}
+
     for zone in sorted(cfg.zones, key=lambda z: z.priority):
         x0, y0, x1, y1 = zone.pixel_rect(w, h)
+        row = rows.setdefault(zone.rect, 0)
+        rows[zone.rect] = row + 1
         color = ZONE_BGR.get(zone.match, (200, 200, 200))
         if not zone.enabled:
             color = (110, 110, 110)
@@ -51,7 +57,9 @@ def render_overlay(cfg, img: np.ndarray, counts: dict | None = None, active: str
             if zone.hit(red_px, blue_px):
                 label += "  HIT"
                 cv2.rectangle(out, (x0 - 4, y0 - 4), (x1 + 4, y1 + 4), (0, 255, 0), 3)
-        cv2.putText(out, label, (x0, max(20, y0 - 8)), 0, 0.62, color, 2, cv2.LINE_AA)
+        ly = max(18, y0 - 8 - row * 20)
+        cv2.putText(out, label, (x0, ly), 0, 0.55, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(out, label, (x0, ly), 0, 0.55, color, 1, cv2.LINE_AA)
 
     for drum in ("red", "blue"):
         fx, fy = cfg.drum(drum)
