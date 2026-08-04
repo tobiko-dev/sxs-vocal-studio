@@ -171,6 +171,37 @@ forwarded to the phone, so picking targets by clicking taps the game as you go.
 Re-run setup any time with `run --setup`. Do that whenever the mirroring window
 moves, since the coordinates are absolute.
 
+### How notes are recognised
+
+Notes come in many variants — plain, beamed, dotted, with lightning-bolt
+accents — and each family spans a wide range of shades. Blue runs from dark navy
+to pale cyan; red runs from crimson through magenta to purple. Those are far
+apart in RGB, which is why matching each family against a single sampled colour
+kept failing: one sample cannot cover navy *and* cyan.
+
+What they share is **hue**. Measured across 5.1M strongly-coloured pixels from a
+gameplay recording:
+
+| hue | pixels | what |
+|---|---|---|
+| 10–24 | 1.2M | desk and lightning-bolt accents — ignored |
+| **85–118** | **1.27M** | **blue family**, navy → cyan |
+| 119–129 | ~400 | empty corridor between the families |
+| **130–179, 0–9** | **2.5M** | **red family**, purple → magenta → crimson |
+
+So a pixel's family is decided by hue alone, which doesn't care how light or
+dark a variant is. Saturation and brightness only separate note art from the
+pale bubble and the background — they play no part in choosing a family.
+
+The mirror ball needs no special handling: its colours already sit in the blue
+family. Nor does a "both" marker: two notes are recognised by both families
+appearing at once.
+
+Setup still samples the colours you point at, but they now **verify** the bands
+— confirming your blue really lands in the blue band, and widening a band if
+your display shifts a hue slightly — rather than acting as nearest-colour
+anchors.
+
 ### Why setup asks for the *vivid* part, not the darkest
 
 Measured on the reference frames: the shadowed cores of the blue and red notes
@@ -331,11 +362,12 @@ vocalbot/
   tap.py        threaded tap dispatch via CGEventPost
   bot.py        the live loop
   wizard.py     guided setup: global click/key watching, colour sampling
-  palette.py    matching against clicked colours, and the press-both fallback
+  palette.py    hue-family classification and the press-both fallback
+  failsafe.py   stopping: mouse-move watch, time limit, signals
   replay.py     offline replay of the live decision path over a recording
   doctor.py     capture diagnostics: which window, what is actually grabbed
   cli.py        run | calibrate | zone | doctor | bench | probe | replay
-tests/          110 tests: palette, queue scanner, editor, detection, diagnostics
+tests/          150 tests: hue families, stopping, queue scanner, editor, detection
 assets/frames/  reference screenshots with known-correct answers
 ```
 

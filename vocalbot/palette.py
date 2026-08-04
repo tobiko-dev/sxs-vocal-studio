@@ -1,19 +1,35 @@
-"""Colour matching against samples you clicked, rather than hand-tuned gates.
+"""Classifying notes by hue family.
 
-Calibration records the actual colour of each thing on *your* screen: the blue
-note, the red note, optionally the white "both" marker and the disco ball. At
-run time every pixel in the sample box is matched to the nearest sample and
-counted. That replaces the HSV thresholds, which had to be guessed in advance
-and re-tuned whenever the display differed.
+The notes come in many variants - plain, beamed, dotted, with lightning bolts -
+and each family covers a wide range of shades. Blue runs from dark navy to pale
+cyan; red runs from crimson through magenta to purple. Those are far apart in
+RGB, which is why matching against a single clicked colour per family kept
+failing: one sample cannot cover navy *and* cyan.
 
-The fallback rule is yours: if the box clearly has something in it but it
-matches neither the blue nor the red sample, treat it as both.
+What they do share is hue. Measured over 5.1M strongly-coloured pixels from a
+gameplay recording, the two families sit in separate hue bands with an empty
+corridor between them:
+
+    hue  10- 24   desk and the lightning-bolt accents   (ignored)
+    hue  85-118   blue family, navy through cyan        1.27M px
+    hue 119-129   ~400 px in total - effectively empty
+    hue 130-179   red family, purple through crimson    2.5M px
+    hue   0-  9   the red wrap-around
+
+So classification is by hue band, which is invariant to how light or dark a
+variant happens to be. Saturation and value only gate out the pale bubble and
+the background; they play no part in deciding which family a pixel belongs to.
+
+Setup still samples the colours you point at, but they are used to *verify* the
+bands - confirming your blue really lands in the blue band, and widening a band
+if your display shifts a hue slightly - rather than as nearest-colour anchors.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
 DRUMS = ("red", "blue")
@@ -21,12 +37,12 @@ DRUMS = ("red", "blue")
 
 @dataclass
 class Sample:
-    """One clicked reference colour."""
+    """One colour you pointed at during setup. Kept for reference and checking."""
 
     name: str
-    rgb: tuple[int, int, int]  # as BGR, matching OpenCV
+    rgb: tuple[int, int, int]  # BGR, matching OpenCV
     taps: tuple[str, ...]
-    point: tuple[int, int] | None = None  # absolute screen coords, for reference
+    point: tuple[int, int] | None = None
 
     def __post_init__(self):
         bad = [d for d in self.taps if d not in DRUMS]
@@ -35,20 +51,81 @@ class Sample:
         self.rgb = tuple(int(c) for c in self.rgb)
         self.taps = tuple(self.taps)
 
+    @property
+    def hue(self) -> int:
+        px = np.array([[list(self.rgb)]], dtype=np.uint8)
+        return int(cv2.cvtColor(px, cv2.COLOR_BGR2HSV)[0, 0, 0])
+
+
+@dataclass
+class HueBand:
+    """A family of note colours, as one or more inclusive hue ranges.
+
+    Red needs two ranges because hue wraps: crimson sits just above 0 and
+    magenta just below 180.
+    """
+
+    name: str
+    ranges: list[tuple[int, int]]
+    taps: tuple[str, ...]
+
+    def contains(self, hue: int) -> bool:
+        return any(lo <= hue <= hi for lo, hi in self.ranges)
+
+    def mask(self, h):
+        out = np.zeros(h.shape, dtype=bool)
+        for lo, hi in self.ranges:
+            out |= (h >= lo) & (h <= hi)
+        return out
+
+    def widen_to(self, hue: int, margin: int = 4) -> bool:
+        """Stretch the nearest range to include `hue`. True if anything changed."""
+        if self.contains(hue):
+            return False
+        best, best_gap = None, 10**9
+        for i, (lo, hi) in enumerate(self.ranges):
+            gap = lo - hue if hue < lo else hue - hi
+            if gap < best_gap:
+                best, best_gap = i, gap
+        lo, hi = self.ranges[best]
+        self.ranges[best] = (min(lo, hue - margin), hi) if hue < lo else (lo, max(hi, hue + margin))
+        return True
+
+
+def default_bands() -> list[HueBand]:
+    return [
+        HueBand("blue", [(85, 120)], ("blue",)),
+        HueBand("red", [(128, 179), (0, 10)], ("red",)),
+    ]
+
 
 @dataclass
 class Palette:
-    """The set of sampled colours plus the matching rules."""
-
+    bands: list[HueBand] = field(default_factory=default_bands)
     samples: list[Sample] = field(default_factory=list)
-    tolerance: int = 70  # max euclidean BGR distance to count as a match
-    min_pixels: int = 25  # absolute floor for a class to count as present
-    # A class also has to be a real share of the strongest one. Without this a
-    # handful of stray matches - anti-aliased edges, a sliver of the note behind
-    # - reads as a second colour and adds a phantom drum press.
+
+    # Gates for "this pixel is part of a note", not for which family it is.
+    sat_min: int = 100
+    val_min: int = 70
+
+    min_pixels: int = 60  # absolute floor for a family to count as present
+    # A family also has to be a real share of the strongest one, or a few
+    # stray pixels from the note behind read as a second note.
     relative_floor: float = 0.18
-    unknown_is_both: bool = True  # your rule: not blue, not red -> press both
-    unknown_min: int = 150  # 'unknown' must be substantial, not bubble noise
+
+    # Your rule, kept as a safety net. It should now be rare: the bands cover
+    # every note variant, so an unrecognised strong colour means something new.
+    unknown_is_both: bool = True
+    unknown_min: int = 400
+    # Hues that are scenery, not notes - the wooden desk and the lightning-bolt
+    # accents live here, and must not count as "unrecognised".
+    ignore_ranges: list[tuple[int, int]] = field(default_factory=lambda: [(11, 34)])
+
+    def band(self, name: str) -> HueBand | None:
+        for b in self.bands:
+            if b.name == name:
+                return b
+        return None
 
     def by_name(self, name: str) -> Sample | None:
         for s in self.samples:
@@ -58,65 +135,66 @@ class Palette:
 
     @property
     def names(self) -> list[str]:
-        return [s.name for s in self.samples]
+        return [b.name for b in self.bands]
 
     def is_ready(self) -> bool:
-        """Both note colours are the minimum needed to play."""
-        return self.by_name("blue") is not None and self.by_name("red") is not None
+        return bool(self.band("blue")) and bool(self.band("red"))
 
 
 def count_matches(region_bgr: np.ndarray, palette: Palette, step: int = 3) -> dict[str, int]:
-    """Count pixels nearest to each sample, plus 'unknown' and 'background'.
+    """Count strongly-coloured pixels per hue family.
 
-    'unknown' is a pixel that is clearly part of a note - it stands out from the
-    box's own background - but matches no sample. That is what drives the
-    press-both fallback.
+    Also returns 'unknown' - strong colour that is neither family nor scenery -
+    and 'background', everything too pale to be part of a note.
     """
-    if not palette.samples:
-        return {}
-
-    px = region_bgr[::step, ::step].reshape(-1, 3).astype(np.int32)
-    if px.size == 0:
+    if region_bgr.size == 0:
         return {name: 0 for name in palette.names} | {"unknown": 0, "background": 0}
 
-    refs = np.array([s.rgb for s in palette.samples], dtype=np.int32)
-    # squared distance from every pixel to every sample
-    d2 = ((px[:, None, :] - refs[None, :, :]) ** 2).sum(axis=2)
-    nearest = d2.argmin(axis=1)
-    best_d2 = d2[np.arange(len(px)), nearest]
-    within = best_d2 <= palette.tolerance ** 2
+    small = region_bgr[::step, ::step]
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    strong = (s > palette.sat_min) & (v > palette.val_min)
 
-    counts = {name: 0 for name in palette.names}
-    for i, name in enumerate(palette.names):
-        counts[name] = int(((nearest == i) & within).sum())
+    counts: dict[str, int] = {}
+    claimed = np.zeros(h.shape, dtype=bool)
+    for band in palette.bands:
+        m = strong & band.mask(h)
+        counts[band.name] = int(m.sum())
+        claimed |= m
 
-    # Anything unmatched but *strongly* coloured is a note we have no sample
-    # for. The bar is high: the box is full of pale bubble and desk pixels that
-    # match nothing, and treating those as "unknown" would fire on every frame.
-    unmatched = ~within
-    spread = px.max(axis=1) - px.min(axis=1)  # cheap saturation proxy
-    counts["unknown"] = int((unmatched & (spread > 90)).sum())
-    counts["background"] = int((unmatched & (spread <= 90)).sum())
+    scenery = np.zeros(h.shape, dtype=bool)
+    for lo, hi in palette.ignore_ranges:
+        scenery |= (h >= lo) & (h <= hi)
+
+    counts["unknown"] = int((strong & ~claimed & ~scenery).sum())
+    counts["background"] = int((~strong).sum())
     return counts
 
 
 def decide_taps(counts: dict[str, int], palette: Palette,
                 tap_order: tuple[str, ...] = ("red", "blue")) -> list[str]:
-    """Turn per-sample counts into the drums to press."""
+    """Turn per-family counts into the drums to press."""
     if not counts:
         return []
-    matched = {s.name: counts.get(s.name, 0) for s in palette.samples}
+    matched = {b.name: counts.get(b.name, 0) for b in palette.bands}
     strongest = max(matched.values(), default=0)
     claimed: set[str] = set()
 
-    for sample in palette.samples:
-        n = matched[sample.name]
+    for band in palette.bands:
+        n = matched[band.name]
         if n >= palette.min_pixels and n >= palette.relative_floor * strongest:
-            claimed.update(sample.taps)
+            claimed.update(band.taps)
 
     if not claimed and palette.unknown_is_both:
         if counts.get("unknown", 0) >= palette.unknown_min:
-            # Something is there and it matches none of the samples.
             claimed.update(DRUMS)
 
     return [d for d in tap_order if d in claimed]
+
+
+def check_sample(palette: Palette, sample: Sample) -> str | None:
+    """Which band a clicked colour lands in, or None if it lands in neither."""
+    for band in palette.bands:
+        if band.contains(sample.hue):
+            return band.name
+    return None

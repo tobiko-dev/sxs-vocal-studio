@@ -1,7 +1,9 @@
-"""Tests for colour matching against clicked samples.
+"""Tests for hue-family classification.
 
-Setup records the colour of each note from your own screen, so detection stops
-depending on thresholds guessed from reference screenshots.
+Notes come in many variants - plain, beamed, dotted, lightning-bolt - and each
+family spans a wide range of shades. Blue runs navy to cyan, red runs crimson
+through magenta to purple. Those are far apart in RGB but share a hue family,
+which is what classification keys on.
 """
 
 from __future__ import annotations
@@ -12,145 +14,244 @@ import cv2
 import numpy as np
 import pytest
 
-from vocalbot.palette import Palette, Sample, count_matches, decide_taps
+from vocalbot.palette import (
+    HueBand,
+    Palette,
+    Sample,
+    check_sample,
+    count_matches,
+    decide_taps,
+)
 from vocalbot.wizard import sample_rect_from_points, vivid_colour
 
 FRAMES = Path(__file__).resolve().parent.parent / "assets" / "frames"
 
-BLUE = (221, 166, 32)  # BGR, sampled from the vivid core of a blue note
-RED = (157, 33, 222)
+
+def patch(hue: int, sat: int = 200, val: int = 200, size=(40, 120)) -> np.ndarray:
+    """A solid BGR patch at a given hue."""
+    hsv = np.full((size[0], size[1], 3), (hue, sat, val), dtype=np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
 def slot(name: str) -> np.ndarray:
-    """The front-slot region of a reference frame."""
     img = cv2.imread(str(FRAMES / f"{name}.png"))
     assert img is not None, name
     h, w = img.shape[:2]
     return img[int(0.65 * h): int(0.70 * h), int(0.25 * w): int(0.75 * w)]
 
 
-def two_colour_palette(**kw) -> Palette:
-    return Palette(
-        samples=[Sample("blue", BLUE, ("blue",)), Sample("red", RED, ("red",))], **kw
-    )
+# --------------------------------------------------------------------------
+# every note variant
+
+
+@pytest.mark.parametrize(
+    "hue,family",
+    [
+        (90, "blue"),   # pale cyan
+        (99, "blue"),   # mid blue
+        (110, "blue"),  # royal blue
+        (118, "blue"),  # navy, the darkest variant
+        (132, "red"),   # purple, the top of a beamed note's gradient
+        (150, "red"),   # magenta
+        (168, "red"),   # pink-red
+        (178, "red"),   # crimson
+        (3, "red"),     # crimson past the hue wrap
+    ],
+)
+def test_every_shade_lands_in_the_right_family(hue, family):
+    """One sample per family could never cover this spread in RGB; hue can."""
+    pal = Palette()
+    counts = count_matches(patch(hue), pal, step=1)
+    assert counts[family] > 0, counts
+    other = "red" if family == "blue" else "blue"
+    assert counts[other] == 0, counts
+
+
+def test_navy_and_cyan_are_both_blue():
+    """The two extremes of the blue family, which are far apart in RGB."""
+    pal = Palette()
+    for hue in (88, 118):
+        assert decide_taps(count_matches(patch(hue), pal, step=1), pal) == ["blue"]
+
+
+def test_purple_and_crimson_are_both_red():
+    pal = Palette()
+    for hue in (131, 178):
+        assert decide_taps(count_matches(patch(hue), pal, step=1), pal) == ["red"]
+
+
+def test_the_gap_between_families_is_unclaimed():
+    """Measured on 5.1M pixels, hues 119-129 are effectively empty. Nothing
+    should be forced into a family from there."""
+    pal = Palette()
+    counts = count_matches(patch(124), pal, step=1)
+    assert counts["blue"] == 0 and counts["red"] == 0
+
+
+def test_lightning_bolts_and_desk_are_ignored():
+    """Bolt accents and the wooden desk sit around hue 10-30. They are scenery,
+    and must not read as a note or as an unrecognised colour."""
+    pal = Palette()
+    for hue in (15, 20, 30):
+        counts = count_matches(patch(hue), pal, step=1)
+        assert counts["blue"] == 0 and counts["red"] == 0
+        assert counts["unknown"] == 0, f"hue {hue} counted as unknown"
+
+
+def test_pale_bubble_is_not_a_note():
+    """The bubbles are pale; only strongly coloured pixels are notes."""
+    pal = Palette()
+    counts = count_matches(patch(99, sat=40, val=240), pal, step=1)
+    assert counts["blue"] == 0
+    assert counts["background"] > 0
 
 
 # --------------------------------------------------------------------------
-# against the reference frames
+# the reference frames
 
 
 @pytest.mark.parametrize(
     "name,expected",
     [("frame_t59_red", ["red"]), ("frame_t53_both", ["red", "blue"]),
-     ("frame_t37_fever", ["red"])],
+     ("frame_t42_disco", ["blue"]), ("frame_t37_fever", ["red"])],
 )
-def test_notes_are_read_correctly(name, expected):
-    pal = two_colour_palette(tolerance=70)
+def test_reference_frames(name, expected):
+    pal = Palette()
     assert decide_taps(count_matches(slot(name), pal), pal) == expected
 
 
-def test_fever_does_not_add_a_phantom_blue():
-    """Fever tints the screen gold; that must not push a red note into 'both'."""
-    pal = two_colour_palette(tolerance=70)
+def test_disco_ball_needs_no_sample_of_its_own():
+    """The ball's colours already sit in the blue family."""
+    pal = Palette()
+    counts = count_matches(slot("frame_t42_disco"), pal)
+    assert counts["blue"] > pal.min_pixels
+    assert counts["red"] < pal.min_pixels
+
+
+def test_fever_tint_does_not_add_a_phantom_blue():
+    pal = Palette()
     counts = count_matches(slot("frame_t37_fever"), pal)
     assert counts["red"] > pal.min_pixels
     assert counts["blue"] < pal.min_pixels
 
 
-def test_a_stray_sliver_of_the_other_colour_is_ignored():
-    """The note behind the front one can leak a few pixels in. A relative floor
-    keeps that from reading as a second note and adding a phantom press."""
-    pal = two_colour_palette()
-    counts = {"red": 400, "blue": 30, "unknown": 0, "background": 0}
-    assert decide_taps(counts, pal) == ["red"]
+# --------------------------------------------------------------------------
+# deciding
+
+
+def test_a_stray_sliver_of_the_other_family_is_ignored():
+    pal = Palette()
+    assert decide_taps({"red": 4000, "blue": 200, "unknown": 0}, pal) == ["red"]
 
 
 def test_a_genuine_second_note_is_not_ignored():
-    pal = two_colour_palette()
-    counts = {"red": 400, "blue": 120, "unknown": 0, "background": 0}
-    assert decide_taps(counts, pal) == ["red", "blue"]
+    pal = Palette()
+    assert decide_taps({"red": 4000, "blue": 1500, "unknown": 0}, pal) == ["red", "blue"]
 
 
-# --------------------------------------------------------------------------
-# the press-both fallback
+def test_nothing_on_screen_presses_nothing():
+    pal = Palette()
+    assert decide_taps({"red": 0, "blue": 0, "unknown": 0}, pal) == []
 
 
-def test_unmatched_colour_presses_both():
-    """Your rule: if it is neither of the sampled notes, press both."""
-    pal = two_colour_palette()
-    counts = {"red": 0, "blue": 0, "unknown": 900, "background": 100}
-    assert decide_taps(counts, pal) == ["red", "blue"]
+def test_unrecognised_colour_presses_both():
+    """Kept as a safety net for a variant the bands don't cover."""
+    pal = Palette()
+    assert decide_taps({"red": 0, "blue": 0, "unknown": 9000}, pal) == ["red", "blue"]
 
 
-def test_bubble_noise_does_not_trigger_the_fallback():
-    """The box is full of pale unmatched pixels every frame. Only a substantial
-    unknown count may fire, or the bot presses both continuously."""
-    pal = two_colour_palette()
-    counts = {"red": 0, "blue": 0, "unknown": pal.unknown_min - 1, "background": 5000}
+def test_the_fallback_needs_a_substantial_amount():
+    pal = Palette()
+    counts = {"red": 0, "blue": 0, "unknown": pal.unknown_min - 1}
     assert decide_taps(counts, pal) == []
 
 
-def test_fallback_does_not_override_a_clear_read():
-    pal = two_colour_palette()
-    counts = {"red": 500, "blue": 0, "unknown": 5000, "background": 0}
-    assert decide_taps(counts, pal) == ["red"]
+def test_the_fallback_never_overrides_a_clear_read():
+    pal = Palette()
+    assert decide_taps({"red": 5000, "blue": 0, "unknown": 9000}, pal) == ["red"]
 
 
-def test_fallback_can_be_disabled():
-    pal = two_colour_palette(unknown_is_both=False)
-    counts = {"red": 0, "blue": 0, "unknown": 9000, "background": 0}
-    assert decide_taps(counts, pal) == []
-
-
-def test_empty_box_presses_nothing():
-    pal = two_colour_palette()
-    blank = np.full((60, 300, 3), 128, np.uint8)
-    assert decide_taps(count_matches(blank, pal), pal) == []
+def test_tap_order_is_respected():
+    pal = Palette()
+    counts = {"red": 4000, "blue": 4000, "unknown": 0}
+    assert decide_taps(counts, pal, tap_order=("blue", "red")) == ["blue", "red"]
 
 
 # --------------------------------------------------------------------------
-# sampling
+# bands and samples
+
+
+def test_band_membership():
+    band = HueBand("blue", [(85, 120)], ("blue",))
+    assert band.contains(85) and band.contains(120)
+    assert not band.contains(84) and not band.contains(121)
+
+
+def test_red_band_wraps_around_zero():
+    red = Palette().band("red")
+    assert red.contains(179) and red.contains(3)
+    assert not red.contains(60)
+
+
+def test_widening_pulls_a_band_to_include_a_nearby_hue():
+    """A display that shifts hue slightly shouldn't need a code change."""
+    band = HueBand("blue", [(85, 120)], ("blue",))
+    assert band.widen_to(123)
+    assert band.contains(123)
+    assert not band.widen_to(100)  # already inside, nothing to do
+
+
+def test_widening_picks_the_nearest_range():
+    red = Palette().band("red")
+    red.widen_to(14)  # just above the 0-10 wrap range
+    assert red.contains(14)
+    assert red.contains(179)  # the other range is untouched
+
+
+def test_sample_reports_its_hue():
+    assert Sample("blue", (221, 166, 32), ("blue",)).hue == pytest.approx(99, abs=3)
+    assert Sample("red", (157, 33, 222), ("red",)).hue == pytest.approx(160, abs=3)
+
+
+def test_check_sample_names_the_band():
+    pal = Palette()
+    assert check_sample(pal, Sample("blue", (221, 166, 32), ("blue",))) == "blue"
+    assert check_sample(pal, Sample("red", (157, 33, 222), ("red",))) == "red"
+
+
+def test_check_sample_flags_a_colour_in_neither_band():
+    """Pointing at the desk by mistake has to be detectable."""
+    pal = Palette()
+    desk = cv2.cvtColor(np.uint8([[[18, 180, 200]]]), cv2.COLOR_HSV2BGR)[0, 0]
+    assert check_sample(pal, Sample("blue", tuple(int(c) for c in desk), ("blue",))) is None
+
+
+def test_sample_rejects_unknown_drums():
+    with pytest.raises(ValueError):
+        Sample("x", (1, 2, 3), ("green",))
+
+
+def test_palette_is_ready_with_both_bands():
+    assert Palette().is_ready()
+
+
+# --------------------------------------------------------------------------
+# sampling helpers
 
 
 def test_vivid_colour_ignores_washed_out_pixels():
-    """A click that catches some pale bubble must still yield the note colour."""
-    patch = np.full((11, 11, 3), 235, np.uint8)  # mostly pale
-    patch[4:7, 4:7] = BLUE  # vivid core
-    got = vivid_colour(patch)
-    assert np.linalg.norm(np.array(got, int) - np.array(BLUE, int)) < 60
+    blue = (221, 166, 32)
+    p = np.full((11, 11, 3), 235, np.uint8)
+    p[4:7, 4:7] = blue
+    assert np.linalg.norm(np.array(vivid_colour(p), int) - np.array(blue, int)) < 60
 
 
 def test_vivid_colour_survives_a_flat_patch():
-    flat = np.full((11, 11, 3), 90, np.uint8)
-    assert vivid_colour(flat) == (90, 90, 90)
+    assert vivid_colour(np.full((11, 11, 3), 90, np.uint8)) == (90, 90, 90)
 
 
-def test_dark_samples_would_be_indistinguishable():
-    """Why setup asks for the vivid part rather than the darkest.
-
-    The shadowed cores of the two notes are nearly the same colour, so sampling
-    there would collapse both classes into one.
-    """
-    img = cv2.imread(str(FRAMES / "frame_t53_both.png"))
-    h, w = img.shape[:2]
-    box = img[int(0.65 * h): int(0.70 * h), int(0.25 * w): int(0.75 * w)]
-    hsv = cv2.cvtColor(box, cv2.COLOR_BGR2HSV)
-    hh, ss, vv = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-
-    def darkest(mask):
-        ys, xs = np.where(mask)
-        return box[ys[np.argmin(vv[ys, xs])], xs[np.argmin(vv[ys, xs])]].astype(int)
-
-    dark_blue = darkest((hh >= 88) & (hh <= 118) & (ss > 90) & (vv > 90))
-    dark_red = darkest(((hh >= 150) | (hh <= 9)) & (ss > 110) & (vv > 90))
-    dark_gap = np.linalg.norm(dark_blue - dark_red)
-    vivid_gap = np.linalg.norm(np.array(BLUE, int) - np.array(RED, int))
-    assert dark_gap < 100 < vivid_gap
-
-
-def test_sample_rect_covers_both_click_points():
-    rect = sample_rect_from_points([(1000, 600), (1100, 620)])
-    x, y, w, h = rect
+def test_sample_rect_covers_both_points():
+    x, y, w, h = sample_rect_from_points([(1000, 600), (1100, 620)])
     for px, py in ((1000, 600), (1100, 620)):
         assert x <= px <= x + w and y <= py <= y + h
 
@@ -159,44 +260,19 @@ def test_sample_rect_is_none_without_points():
     assert sample_rect_from_points([]) is None
 
 
-# --------------------------------------------------------------------------
-# palette bookkeeping
-
-
-def test_palette_is_not_ready_without_both_notes():
-    assert not Palette().is_ready()
-    assert not Palette(samples=[Sample("blue", BLUE, ("blue",))]).is_ready()
-    assert two_colour_palette().is_ready()
-
-
-def test_sample_rejects_unknown_drums():
-    with pytest.raises(ValueError):
-        Sample("x", (1, 2, 3), ("green",))
-
-
-def test_counts_cover_every_sample():
-    pal = two_colour_palette()
-    counts = count_matches(slot("frame_t53_both"), pal)
-    for name in pal.names:
-        assert name in counts
-    assert "unknown" in counts and "background" in counts
-
-
 def test_subsampling_does_not_change_the_verdict():
-    pal = two_colour_palette(tolerance=70)
+    pal = Palette()
     region = slot("frame_t53_both")
-    fine = decide_taps(count_matches(region, pal, step=1), pal)
-    coarse = decide_taps(count_matches(region, pal, step=3), pal)
-    assert fine == coarse
+    assert (decide_taps(count_matches(region, pal, step=1), pal)
+            == decide_taps(count_matches(region, pal, step=3), pal))
 
 
 # --------------------------------------------------------------------------
 # hover-to-select
 #
-# Targets are picked by hovering, not clicking or pressing a key: reading the
-# cursor position needs no permission, while reading key or mouse-button state
-# needs macOS Input Monitoring and silently reports nothing when that is
-# missing.
+# Targets are picked by hovering: reading the cursor position needs no
+# permission, while key or mouse-button state needs macOS Input Monitoring and
+# silently reports nothing when that is missing.
 
 
 class FakeClock:
@@ -211,7 +287,6 @@ class FakeClock:
 
 
 def run_dwell(path, **kw):
-    """Feed a scripted cursor path through the dwell detector."""
     from vocalbot.wizard import dwell
 
     clock = FakeClock()
@@ -229,19 +304,15 @@ def run_dwell(path, **kw):
 
 
 def test_holding_still_locks_the_point():
-    point = (500, 400)
-    assert run_dwell([point] * 400, hold=1.0) == point
+    assert run_dwell([(500, 400)] * 400, hold=1.0) == (500, 400)
 
 
 def test_moving_restarts_the_hold():
-    """Overshooting a target must cost nothing but time."""
     wander = [(100 + i * 40, 200) for i in range(30)]
-    settled = [(900, 200)] * 400
-    assert run_dwell(wander + settled, hold=1.0) == (900, 200)
+    assert run_dwell(wander + [(900, 200)] * 400, hold=1.0) == (900, 200)
 
 
 def test_small_wobble_still_counts_as_still():
-    """A hand resting on a trackpad is never perfectly motionless."""
     jitter = [(500 + (i % 3), 400 - (i % 2)) for i in range(400)]
     got = run_dwell(jitter, hold=1.0, radius=8)
     assert got is not None and abs(got[0] - 500) <= 8
@@ -255,5 +326,4 @@ def test_constant_movement_never_locks():
 def test_dwell_reports_progress():
     seen = []
     run_dwell([(300, 300)] * 400, hold=1.0, on_tick=lambda p, f: seen.append(f))
-    assert seen and seen[0] < seen[-1]
-    assert max(seen) <= 1.0
+    assert seen and seen[0] < seen[-1] and max(seen) <= 1.0

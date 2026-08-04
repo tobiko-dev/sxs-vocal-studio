@@ -332,7 +332,7 @@ class Config:
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
-        from .palette import Palette, Sample
+        from .palette import HueBand, Palette, Sample
 
         raw = json.loads(Path(path).read_text())
         if isinstance(raw.get("palette"), dict):
@@ -346,6 +346,15 @@ class Config:
                 )
                 for s in pal.get("samples", [])
             ]
+            pal["bands"] = [
+                HueBand(name=b["name"], ranges=[tuple(r) for r in b["ranges"]],
+                        taps=tuple(b["taps"]))
+                for b in pal.get("bands", [])
+            ] or None
+            if pal["bands"] is None:
+                pal.pop("bands")
+            if "ignore_ranges" in pal:
+                pal["ignore_ranges"] = [tuple(r) for r in pal["ignore_ranges"]]
             raw["palette"] = Palette(**pal)
         if isinstance(raw.get("sample_rect"), list):
             raw["sample_rect"] = tuple(raw["sample_rect"])

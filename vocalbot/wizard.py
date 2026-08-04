@@ -68,13 +68,13 @@ COLOUR_STEPS = [
          taps=("red",)),
     Step("both", "Hover over a WHITE 'both' area",
          "Only if a distinct marker appears when two notes arrive together. "
-         "Skipping is fine - anything that matches neither note counts as both.",
+         "Skipping is normal - two notes are recognised by both families showing "
+         "up at once, not by a separate marker.",
          optional=True, taps=("red", "blue")),
-    Step("disco", "Hover over the PURPLE part of the disco ball",
-         "Only if a mirror ball is on screen right now, and only if its purple "
-         "looks strong rather than pastel - a washed-out sample also matches the "
-         "pale bubbles and causes phantom presses. Skipping is usually better: "
-         "the ball reads as blue on its own.",
+    Step("disco", "Hover over the disco ball",
+         "Only if a mirror ball is on screen. Skipping is normal - the ball's "
+         "colours sit in the blue family already, so it plays on the blue drum "
+         "without needing its own sample.",
          optional=True, taps=("blue",)),
 ]
 
@@ -236,7 +236,7 @@ def _wrap(text: str, width: int) -> list[str]:
 def run_setup(cfg, config_path: str) -> bool:
     """Walk the steps and write the results into cfg. Returns True if saved."""
     from .capture import activate_mirror_app
-    from .palette import Palette, Sample
+    from .palette import Palette, Sample, check_sample
 
     try:
         pointer = Pointer()
@@ -274,6 +274,7 @@ def run_setup(cfg, config_path: str) -> bool:
     drum_points: dict[str, tuple[int, int]] = {}
     samples: list[Sample] = []
     colour_points: list[tuple[int, int]] = []
+    palette = Palette()
     n = 1
 
     for step in DRUM_STEPS:
@@ -302,20 +303,37 @@ def run_setup(cfg, config_path: str) -> bool:
             print("  timed out - that one is required, stopping.")
             return False
         bgr = sample_colour(pos)
-        if max(bgr) - min(bgr) < 60:
-            print(f"  WARNING: BGR={bgr} is washed out. Pale samples also match the")
-            print("  bubbles and the background, which causes phantom presses.")
-            print("  Prefer a more vivid spot, or skip this one.")
-        clash = _too_close(bgr, samples)
-        if clash:
-            print(f"  WARNING: that colour is very close to '{clash}'. The two will")
-            print("  be hard to tell apart - click a more vivid part and re-run setup.")
-        samples.append(Sample(name=step.key, rgb=bgr, taps=step.taps, point=pos))
-        colour_points.append(pos)
-        print(f"  recorded at {pos}   colour BGR={bgr}")
+        sample = Sample(name=step.key, rgb=bgr, taps=step.taps, point=pos)
+        print(f"  recorded at {pos}   colour BGR={bgr}  hue={sample.hue}")
 
+        if max(bgr) - min(bgr) < 60:
+            print("  WARNING: that colour is washed out - it may be the bubble rather")
+            print("  than the note. Prefer a more vivid spot.")
+
+        # Notes are classified by hue family, so what matters is which band the
+        # sample lands in, not its exact shade.
+        landed = check_sample(palette, sample)
+        expected = {"blue": "blue", "red": "red"}.get(step.key)
+        if landed is None:
+            band = palette.band(expected) if expected else None
+            if band is not None and band.widen_to(sample.hue):
+                print(f"  hue {sample.hue} sat just outside the '{expected}' band -")
+                print(f"  widened it to {band.ranges}.")
+            else:
+                print(f"  NOTE: hue {sample.hue} is in neither note band. If this was")
+                print("  the desk or a lightning bolt rather than a note, redo setup.")
+        elif expected and landed != expected:
+            print(f"  WARNING: that colour reads as '{landed}', not '{expected}'.")
+            print("  Check you pointed at the right note.")
+        else:
+            print(f"  hue {sample.hue} lands in the '{landed}' band")
+
+        samples.append(sample)
+        colour_points.append(pos)
+
+    palette.samples = samples
     cfg.drum_points = {k: tuple(v) for k, v in drum_points.items()}
-    cfg.palette = Palette(samples=samples)
+    cfg.palette = palette
     cfg.sample_rect = sample_rect_from_points(colour_points)
     cfg.save(config_path)
 
@@ -325,8 +343,10 @@ def run_setup(cfg, config_path: str) -> bool:
     print("=" * 66)
     print(f"  watching {cfg.sample_rect[2]}x{cfg.sample_rect[3]} px "
           f"at ({cfg.sample_rect[0]}, {cfg.sample_rect[1]})")
+    for band in palette.bands:
+        print(f"  {band.name:<6} hue {band.ranges}  -> {'+'.join(band.taps)}")
     for s in samples:
-        print(f"  {s.name:<6} BGR={s.rgb}  -> {'+'.join(s.taps)}")
+        print(f"  sampled {s.name:<6} BGR={s.rgb} hue={s.hue}")
     print(f"  saved to {config_path}")
 
     if not verify(cfg):
