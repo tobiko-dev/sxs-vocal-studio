@@ -136,12 +136,21 @@ Then:
 3. Pin the window:
 
    ```bash
-   python -m vocalbot.cli calibrate window --chrome 28
+   python -m vocalbot.cli calibrate window
    ```
 
-   `--chrome` trims the title bar. The command prints the content aspect ratio —
-   it should be close to **0.4600**. A big mismatch means the trim is wrong or
-   the window is letterboxed.
+   **Have the song playing when you run this.** The mirroring window has no
+   title bar — it's drawn as a phone body with rounded corners and a shadow, so
+   its bounds include margin that isn't screen content, and the padding varies
+   with window size. Rather than guess an inset, the command finds the live
+   screen by *what moves*: the game animates continuously, the desktop behind
+   the window's margin doesn't. Differencing a few frames gives the content rect
+   directly.
+
+   It then prints the content aspect, which should land near **0.4600**, and the
+   drum coverage, which should read 60–70% at both. If the game is paused,
+   detection reports that nothing moved and falls back to the raw window bounds;
+   pass `--no-auto` to skip detection entirely.
 
 4. Place the boxes. The editor is live — it re-grabs every frame, so you can
    **drag boxes while the song plays** and watch the counts move against real
@@ -227,6 +236,8 @@ being grabbed. Usual causes:
   and captures a phone-shaped patch of desktop.
 - **The window moved after calibration.** Coordinates are pinned; re-run
   `calibrate window`.
+- **Calibrated while the game was paused.** Content detection needs motion. Run
+  it with the song playing.
 - **The wrong window was picked.** The app owns several windows, and a helper
   or menu-bar one can match first. `doctor` lists all candidates; the largest
   normal-layer window is the one used.
@@ -237,6 +248,12 @@ drums are visible where they should be** — a real game screen shows 60–70%
 coverage at each drum target, versus under 25% for anything else. That is a much
 more specific test than "does this look busy", which a detailed wallpaper passes
 easily.
+
+### The aspect ratio is wrong, or the drums read 0%
+
+The window bounds are not the screen bounds. Don't reach for `--chrome` — there
+is no title bar to trim, and trimming makes the aspect worse, not better. Re-run
+`calibrate window` with the song **playing** so content detection can work.
 
 ### Zone labels overlap in the calibrator
 

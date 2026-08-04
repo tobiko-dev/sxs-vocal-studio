@@ -70,17 +70,35 @@ def cmd_calibrate(args) -> int:
             for c in cands:
                 print(f"   {c['rect']}  {c['title'] or '(untitled)'}")
         x, y, w, h = rect
-        print(f"window at ({x}, {y}) {w}x{h}")
+        print(f"window at ({x}, {y}) {w}x{h}  aspect {w / h:.4f}")
         if args.chrome:
             y, h = y + args.chrome, h - args.chrome
-            print(f"trimmed {args.chrome}px of title bar -> ({x}, {y}) {w}x{h}")
+            print(f"trimmed {args.chrome}px -> ({x}, {y}) {w}x{h}  aspect {w / h:.4f}")
+
+        if not args.no_auto:
+            # The window is drawn as a phone body with rounded corners and a
+            # shadow, so its bounds include margin that isn't screen content.
+            # There's no title bar to trim and no fixed inset to guess, so find
+            # the live screen by what moves instead.
+            from .capture import MSSCapture, detect_content_rect, snap_to_phone_aspect
+
+            print("detecting the screen inside the window (needs the song playing)...")
+            cap = MSSCapture((x, y, w, h))
+            inner = detect_content_rect(cap.grab)
+            cap.close()
+            if inner is None:
+                print("  nothing moved - is the song running? keeping the window bounds.")
+                print("  re-run while the game is animating, or pass --no-auto.")
+            else:
+                ix, iy, iw, ih = snap_to_phone_aspect(inner)
+                x, y, w, h = x + ix, y + iy, iw, ih
+                print(f"  content at ({x}, {y}) {w}x{h}  aspect {w / h:.4f}")
 
         aspect = w / h
         off = abs(aspect - PHONE_ASPECT) / PHONE_ASPECT
         print(f"content aspect {aspect:.4f} (phone is {PHONE_ASPECT:.4f})")
         if off > 0.06:
-            print(f"WARNING: off by {100 * off:.0f}%. The chrome trim is probably wrong,")
-            print("or the window is letterboxed. Zone boxes will not line up.")
+            print(f"WARNING: off by {100 * off:.0f}%. Zone boxes will not line up.")
 
         cfg.window_rect = (x, y, w, h)
         cfg.save(args.config)
@@ -352,7 +370,10 @@ def main(argv=None) -> int:
     c.add_argument("what", choices=("window", "zones", "drums"))
     c.add_argument("--image", help="calibrate against a saved screenshot instead of a live grab")
     c.add_argument("--out", default="calibration.png")
-    c.add_argument("--chrome", type=int, default=0, help="title bar px to trim (window only)")
+    c.add_argument("--chrome", type=int, default=0,
+                   help="px to trim off the top before auto-detection (rarely needed)")
+    c.add_argument("--no-auto", action="store_true",
+                   help="skip motion-based content detection, use raw window bounds")
     c.set_defaults(func=cmd_calibrate)
 
     z = sub.add_parser("zone", help="inspect or edit zones without a GUI")

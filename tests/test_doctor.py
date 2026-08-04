@@ -96,3 +96,72 @@ def test_example_config_ships_without_a_window_rect():
 
     example = Path(__file__).resolve().parent.parent / "config.example.json"
     assert json.loads(example.read_text())["window_rect"] is None
+
+
+# --------------------------------------------------------------------------
+# finding the phone screen inside the mirroring window
+
+
+def _animating_canvas(ox: int, oy: int, cw: int, ch: int, size=(322, 700)):
+    """A static 'desktop' margin with the game animating inside it."""
+    frames = [cv2.resize(load(n), size) for n in GAME_FRAMES]
+    bg = np.random.default_rng(0).integers(0, 255, (ch, cw, 3), dtype=np.uint8)
+    state = {"i": 0}
+
+    def grab():
+        canvas = bg.copy()
+        canvas[oy: oy + size[1], ox: ox + size[0]] = frames[state["i"] % len(frames)]
+        state["i"] += 1
+        return canvas
+
+    return grab, bg
+
+
+def test_content_rect_is_found_by_motion():
+    """The window includes phone-body margin with no title bar to trim, so the
+    screen is located by what animates rather than by a guessed inset."""
+    from vocalbot.capture import detect_content_rect
+
+    ox, oy, w, h = 17, 11, 322, 700
+    grab, _ = _animating_canvas(ox, oy, w + 2 * ox, h + 2 * oy)
+    rect = detect_content_rect(grab, samples=5, delay=0.0)
+    assert rect is not None
+    x, y, rw, rh = rect
+    # pad=2 deliberately grows the box; anything larger is a real error
+    assert abs(x - ox) <= 3 and abs(y - oy) <= 3
+    assert abs(rw - w) <= 6 and abs(rh - h) <= 6
+
+
+def test_content_rect_returns_none_when_nothing_moves():
+    """A paused game or a still screen must not yield a made-up rect."""
+    from vocalbot.capture import detect_content_rect
+
+    _, bg = _animating_canvas(10, 10, 340, 720)
+    assert detect_content_rect(lambda: bg.copy(), samples=4, delay=0.0) is None
+
+
+def test_detected_rect_finds_the_drums():
+    """The point of detection: the resulting rect must make the drums line up."""
+    from vocalbot.capture import detect_content_rect, snap_to_phone_aspect
+
+    ox, oy, w, h = 17, 11, 322, 700
+    grab, _ = _animating_canvas(ox, oy, w + 2 * ox, h + 2 * oy)
+    x, y, rw, rh = snap_to_phone_aspect(detect_content_rect(grab, samples=5, delay=0.0))
+    frame = grab()[y: y + rh, x: x + rw]
+    assert looks_like_game(Config(), frame), drum_fill(Config(), frame)
+
+
+def test_aspect_snap_corrects_a_near_miss():
+    from vocalbot.capture import PHONE_ASPECT, snap_to_phone_aspect
+
+    x, y, w, h = snap_to_phone_aspect((10, 20, 330, 700))
+    assert abs((w / h) - PHONE_ASPECT) < 0.01
+    assert 10 <= x <= 20 and y == 20  # re-centred, not shifted wholesale
+
+
+def test_aspect_snap_leaves_a_wild_rect_alone():
+    """Snapping a rect that isn't close would silently invent geometry."""
+    from vocalbot.capture import snap_to_phone_aspect
+
+    wild = (0, 0, 900, 200)
+    assert snap_to_phone_aspect(wild) == wild

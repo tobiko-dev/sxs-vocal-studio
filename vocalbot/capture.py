@@ -7,6 +7,7 @@ budget, so this is the single biggest win available.
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 MIRROR_APP_NAMES = ("iPhone Mirroring", "iPhoneMirroring")
@@ -126,6 +127,74 @@ def find_mirror_window() -> tuple[int, int, int, int] | None:
     """
     cands = mirror_candidates()
     return cands[0]["rect"] if cands else None
+
+
+def detect_content_rect(grab, samples: int = 5, delay: float = 0.06,
+                        pad: int = 2) -> tuple[int, int, int, int] | None:
+    """Find the live phone screen inside a window grab, by what moves.
+
+    The mirroring window is drawn as a phone body with rounded corners and a
+    shadow, so its bounds include margin that is not screen content. There is no
+    title bar to trim and no fixed inset to guess - the padding depends on the
+    window size.
+
+    What is reliable is motion. The game animates continuously; whatever sits
+    behind the window's transparent margin does not. Differencing a few frames
+    and taking the bounding box of the changing pixels gives the content rect
+    directly, whatever the padding happens to be.
+
+    `grab` is a callable returning a BGR frame. Returns (x, y, w, h) relative to
+    that frame, or None if nothing moved (the game is paused or on a still
+    screen).
+    """
+    import time
+
+    frames = []
+    for i in range(max(2, samples)):
+        frames.append(cv2.cvtColor(grab(), cv2.COLOR_BGR2GRAY).astype(np.int16))
+        if i < samples - 1:
+            time.sleep(delay)
+
+    motion = np.zeros_like(frames[0], dtype=np.int16)
+    for a, b in zip(frames[:-1], frames[1:]):
+        np.maximum(motion, np.abs(b - a), out=motion)
+
+    mask = (motion > 12).astype(np.uint8)
+    if mask.sum() < 500:
+        return None
+    # Close gaps so static UI inside the screen doesn't split the region.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    ys, xs = np.where(mask > 0)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+
+    h, w = mask.shape
+    x0 = max(0, x0 - pad)
+    y0 = max(0, y0 - pad)
+    x1 = min(w - 1, x1 + pad)
+    y1 = min(h - 1, y1 + pad)
+    return x0, y0, x1 - x0 + 1, y1 - y0 + 1
+
+
+def snap_to_phone_aspect(rect: tuple[int, int, int, int],
+                         tol: float = 0.10) -> tuple[int, int, int, int]:
+    """Nudge a detected rect onto the phone's aspect, keeping its centre.
+
+    Motion only bounds the region that animated, which can fall a few pixels
+    short at an edge that happens to be static. Snapping recovers that when the
+    detection is already close, and leaves it alone when it isn't.
+    """
+    x, y, w, h = rect
+    if h <= 0:
+        return rect
+    aspect = w / h
+    if abs(aspect - PHONE_ASPECT) / PHONE_ASPECT > tol:
+        return rect
+    if aspect > PHONE_ASPECT:  # too wide - trim width
+        new_w = int(round(h * PHONE_ASPECT))
+        return x + (w - new_w) // 2, y, new_w, h
+    new_h = int(round(w / PHONE_ASPECT))
+    return x, y + (h - new_h) // 2, w, new_h
 
 
 def grab_window(cfg) -> "np.ndarray":
