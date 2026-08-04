@@ -11,20 +11,23 @@ work out, because drum positions are recorded in absolute screen coordinates.
 And there are no colour thresholds to guess, because the colours are sampled
 from your screen rather than from reference screenshots.
 
-## Why this watches input globally
+## Why you hover instead of clicking
 
-The prompts are in the terminal but the clicking happens in the mirroring
-window, so the terminal is not focused while you work. Reading stdin would
-capture nothing. Instead the global mouse and keyboard state is polled through
-Quartz - the same Accessibility permission the bot already needs to tap.
+Targets are picked by hovering and holding still, not by clicking or pressing a
+key. That is deliberate.
 
-That is a poll loop, not a thread: a click is a rising edge on the global button
-state, sampled at ~120Hz. Nothing runs concurrently during setup, so there is no
-shared state to guard.
+Reading the global keyboard or mouse-button state needs macOS's **Input
+Monitoring** permission, which is separate from Accessibility and easy to miss -
+and when it is missing the calls do not fail, they just silently report that
+nothing is pressed. Reading the *cursor position* needs no permission at all.
+So setup only asks where the pointer is, which cannot silently do nothing.
 
-Note that clicking inside the mirroring window also sends that touch to the
-phone. Pressing the drums is harmless, and that is most of what you are asked to
-click.
+Dwell also sidesteps a smaller problem: a click inside the mirroring window is
+forwarded to the phone, so picking targets by clicking taps the game as a side
+effect.
+
+Stepping between prompts uses ordinary stdin, since at that moment there is
+nothing to hover and the terminal can hold focus.
 """
 
 from __future__ import annotations
@@ -34,11 +37,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# macOS virtual key codes
-KEY_E = 14
-KEY_S = 1
-KEY_Q = 12
-POLL = 1 / 120
+POLL = 1 / 60
+DWELL_RADIUS = 8  # px of wobble tolerated while holding still
+DWELL_SECONDS = 1.2
 
 
 @dataclass
@@ -51,25 +52,25 @@ class Step:
 
 
 DRUM_STEPS = [
-    Step("blue_drum", "Click the BLUE drum",
+    Step("blue_drum", "Hover over the BLUE drum",
          "The blue drum pad, bottom left. This is where blue notes get pressed."),
-    Step("red_drum", "Click the RED drum",
+    Step("red_drum", "Hover over the RED drum",
          "The red drum pad, bottom right."),
 ]
 
 COLOUR_STEPS = [
-    Step("blue", "Click the most VIVID part of a BLUE note",
+    Step("blue", "Hover over the most VIVID part of a BLUE note",
          "The solid, strongly coloured core of the note symbol at the front of "
          "the queue - not the pale bubble around it, and not a shadowed edge.",
          taps=("blue",)),
-    Step("red", "Click the most VIVID part of a RED note",
+    Step("red", "Hover over the most VIVID part of a RED note",
          "The solid red or magenta core of the symbol, same idea.",
          taps=("red",)),
-    Step("both", "Click a WHITE 'both' area, or press 's' to skip",
+    Step("both", "Hover over a WHITE 'both' area",
          "Only if a distinct marker appears when two notes arrive together. "
          "Skipping is fine - anything that matches neither note counts as both.",
          optional=True, taps=("red", "blue")),
-    Step("disco", "Click the PURPLE part of the disco ball, or press 's' to skip",
+    Step("disco", "Hover over the PURPLE part of the disco ball",
          "Only if a mirror ball is on screen right now, and only if its purple "
          "looks strong rather than pastel - a washed-out sample also matches the "
          "pale bubbles and causes phantom presses. Skipping is usually better: "
@@ -78,70 +79,47 @@ COLOUR_STEPS = [
 ]
 
 
-class Input:
-    """Global mouse and keyboard state. Thin wrapper over Quartz."""
+class Pointer:
+    """Where the cursor is. Needs no special permission, unlike key state."""
 
     def __init__(self):
         import Quartz
 
         self.Q = Quartz
-        self._was_down = False
 
-    def mouse_pos(self) -> tuple[int, int]:
+    def pos(self) -> tuple[int, int]:
         loc = self.Q.CGEventGetLocation(self.Q.CGEventCreate(None))
         return int(loc.x), int(loc.y)
 
-    def mouse_down(self) -> bool:
-        return bool(
-            self.Q.CGEventSourceButtonState(
-                self.Q.kCGEventSourceStateCombinedSessionState, self.Q.kCGMouseButtonLeft
-            )
-        )
+    def wait_for_dwell(self, **kw) -> tuple[int, int] | None:
+        return dwell(self.pos, **kw)
 
-    def key_down(self, keycode: int) -> bool:
-        return bool(
-            self.Q.CGEventSourceKeyState(
-                self.Q.kCGEventSourceStateCombinedSessionState, keycode
-            )
-        )
 
-    def wait_for_click(self, timeout: float = 120.0) -> tuple[int, int] | None:
-        """Block until the left button is pressed and released. Returns the
-        press location, or None if 's' (skip) or 'q' (quit) was pressed."""
-        deadline = time.perf_counter() + timeout
-        # Don't count a button that is already held from the previous step.
-        while self.mouse_down() and time.perf_counter() < deadline:
-            time.sleep(POLL)
-        while time.perf_counter() < deadline:
-            if self.key_down(KEY_S):
-                self._flush_key(KEY_S)
-                return None
-            if self.key_down(KEY_Q):
-                raise KeyboardInterrupt
-            if self.mouse_down():
-                pos = self.mouse_pos()
-                while self.mouse_down() and time.perf_counter() < deadline:
-                    time.sleep(POLL)
-                return pos
-            time.sleep(POLL)
-        return None
+def dwell(pos_fn, radius: int = DWELL_RADIUS, hold: float = DWELL_SECONDS,
+          timeout: float = 180.0, on_tick=None, clock=time.perf_counter,
+          sleep=time.sleep) -> tuple[int, int] | None:
+    """Return where the cursor rested once it has held still for `hold`.
 
-    def wait_for_key(self, keycode: int, timeout: float = 300.0) -> bool:
-        deadline = time.perf_counter() + timeout
-        while self.key_down(keycode) and time.perf_counter() < deadline:
-            time.sleep(POLL)  # ignore a key already held
-        while time.perf_counter() < deadline:
-            if self.key_down(KEY_Q):
-                raise KeyboardInterrupt
-            if self.key_down(keycode):
-                self._flush_key(keycode)
-                return True
-            time.sleep(POLL)
-        return False
+    Moving beyond `radius` restarts the hold, so overshooting a target costs
+    nothing - keep adjusting until it locks. `clock` and `sleep` are injectable
+    so the timing logic can be tested without real waiting.
+    """
+    deadline = clock() + timeout
+    anchor = pos_fn()
+    settled_at = clock()
 
-    def _flush_key(self, keycode: int) -> None:
-        while self.key_down(keycode):
-            time.sleep(POLL)
+    while clock() < deadline:
+        now = clock()
+        here = pos_fn()
+        if abs(here[0] - anchor[0]) > radius or abs(here[1] - anchor[1]) > radius:
+            anchor, settled_at = here, now
+        held = now - settled_at
+        if on_tick:
+            on_tick(here, min(held / hold, 1.0))
+        if held >= hold:
+            return anchor
+        sleep(POLL)
+    return None
 
 
 def sample_colour(point: tuple[int, int], radius: int = 5) -> tuple[int, int, int]:
@@ -201,6 +179,24 @@ def sample_rect_from_points(points, pad_x: int = 90, pad_y: int = 55, min_size: 
     return (int(x0), int(y0), max(min_size, int(x1 - x0)), max(min_size, int(y1 - y0)))
 
 
+def _dwell_tick(pos, frac: float) -> None:
+    filled = int(frac * 20)
+    bar = "#" * filled + "." * (20 - filled)
+    print(f"\r  ({pos[0]:5d}, {pos[1]:5d})  holding [{bar}] ", end="", flush=True)
+
+
+def _ask(prompt: str, default: bool = True) -> bool:
+    """Yes/no via stdin. Used only between steps, when focus is free."""
+    suffix = "[Y/n]" if default else "[y/N]"
+    try:
+        answer = input(f"  {prompt} {suffix} ").strip().lower()
+    except EOFError:
+        return default
+    if not answer:
+        return default
+    return answer.startswith("y")
+
+
 def _distance(a, b) -> float:
     return float(np.sqrt(sum((int(p) - int(q)) ** 2 for p, q in zip(a, b))))
 
@@ -243,7 +239,7 @@ def run_setup(cfg, config_path: str) -> bool:
     from .palette import Palette, Sample
 
     try:
-        watcher = Input()
+        pointer = Pointer()
     except ImportError:
         print("pyobjc-framework-Quartz is required for setup:")
         print("  pip install pyobjc-framework-Quartz")
@@ -256,13 +252,11 @@ def run_setup(cfg, config_path: str) -> bool:
     print("  SETUP")
     print("=" * 66)
     print("  Put this terminal beside the phone window so you can read the")
-    print("  prompts while you click. The prompts appear one at a time.")
+    print("  prompts while you work. They appear one at a time.")
     print()
-    print("  You will click, in order: each drum, then the colour of each kind")
-    print("  of note. Clicks land on the phone, so pressing the drums actually")
-    print("  presses them - that is expected.")
-    print()
-    print("  'q' quits at any point.")
+    print("  You pick each target by HOVERING over it and holding still for a")
+    print("  moment - no clicking. Moving restarts the hold, so overshooting")
+    print("  costs nothing. Ctrl-C stops at any point.")
     print()
 
     if activate_mirror_app():
@@ -271,10 +265,10 @@ def run_setup(cfg, config_path: str) -> bool:
         print("  Could not raise iPhone Mirroring - bring it up yourself.")
 
     print()
-    print("  Start a song, then press 'e' when you are ready to begin.")
-    print("  (press 'e' anywhere - this does not need the terminal focused)")
-    if not watcher.wait_for_key(KEY_E):
-        print("\n  Timed out waiting for 'e'.")
+    print("  Start a song so notes are on screen.")
+    try:
+        input("  Then press ENTER here to begin. ")
+    except EOFError:
         return False
 
     drum_points: dict[str, tuple[int, int]] = {}
@@ -285,10 +279,10 @@ def run_setup(cfg, config_path: str) -> bool:
     for step in DRUM_STEPS:
         n += 1
         _banner(n, total, step)
-        print("  waiting for your click...")
-        pos = watcher.wait_for_click()
+        pos = pointer.wait_for_dwell(on_tick=_dwell_tick)
+        print()
         if pos is None:
-            print("  skipped - a drum position is required, stopping.")
+            print("  timed out - a drum position is required, stopping.")
             return False
         drum_points[step.key.replace("_drum", "")] = pos
         print(f"  recorded at {pos}")
@@ -296,13 +290,16 @@ def run_setup(cfg, config_path: str) -> bool:
     for step in COLOUR_STEPS:
         n += 1
         _banner(n, total, step)
-        print("  waiting for your click..." + ("  ('s' to skip)" if step.optional else ""))
-        pos = watcher.wait_for_click()
+        if step.optional and not _ask("Capture this one?", default=False):
+            print("  skipped.")
+            continue
+        pos = pointer.wait_for_dwell(on_tick=_dwell_tick)
+        print()
         if pos is None:
             if step.optional:
-                print("  skipped.")
+                print("  timed out - skipped.")
                 continue
-            print("  that one is required, stopping.")
+            print("  timed out - that one is required, stopping.")
             return False
         bgr = sample_colour(pos)
         if max(bgr) - min(bgr) < 60:
@@ -332,11 +329,13 @@ def run_setup(cfg, config_path: str) -> bool:
         print(f"  {s.name:<6} BGR={s.rgb}  -> {'+'.join(s.taps)}")
     print(f"  saved to {config_path}")
 
-    verify(cfg, watcher)
+    if not verify(cfg):
+        print("  Re-run `python -m vocalbot.cli run --setup` to try again.")
+        return False
     return True
 
 
-def verify(cfg, watcher, seconds: float = 600.0) -> None:
+def verify(cfg, seconds: float = 25.0) -> bool:
     """Live readout before playing, so a bad sample is obvious immediately.
 
     Reference screenshots can only take this so far - what matters is how the
@@ -352,19 +351,13 @@ def verify(cfg, watcher, seconds: float = 600.0) -> None:
     print("=" * 66)
     print("  Live reading of the box. Watch it against what the game shows:")
     print("  a blue note should read blue, a red note red, a pair both.")
-    print()
-    print("  press 'e' to start playing, 'q' to quit")
+    print(f"  Runs for {int(seconds)}s, or Ctrl-C to stop early.")
     print()
 
     cap = MSSCapture(cfg.sample_rect)
     try:
         deadline = time.perf_counter() + seconds
         while time.perf_counter() < deadline:
-            if watcher.key_down(KEY_Q):
-                raise KeyboardInterrupt
-            if watcher.key_down(KEY_E):
-                watcher._flush_key(KEY_E)
-                break
             counts = count_matches(cap.grab(), cfg.palette, cfg.step)
             taps = decide_taps(counts, cfg.palette, cfg.tap_order)
             cells = "  ".join(
@@ -373,5 +366,10 @@ def verify(cfg, watcher, seconds: float = 600.0) -> None:
             print(f"\r  {cells}  ->  {'+'.join(taps) or '(nothing)':<10s}", end="", flush=True)
             time.sleep(0.05)
         print()
+    except KeyboardInterrupt:
+        print()
     finally:
         cap.close()
+
+    print()
+    return _ask("Does that look right - start playing?", default=True)

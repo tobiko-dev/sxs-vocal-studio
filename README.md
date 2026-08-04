@@ -135,9 +135,9 @@ python -m vocalbot.cli run
 ```
 
 The first run walks you through setup, one prompt at a time. Put the terminal
-beside the phone window so you can read as you click. It raises iPhone
-Mirroring, waits for you to press **`e`** when you're ready, then asks you to
-click, in order:
+beside the phone window so you can read as you work. It raises iPhone Mirroring,
+waits for you to press ENTER in the terminal, then asks you to point at each
+target in turn:
 
 | | |
 |---|---|
@@ -145,15 +145,28 @@ click, in order:
 | the **red drum** | records where to press it |
 | the **vivid core of a blue note** | records what blue looks like on your screen |
 | the **vivid core of a red note** | records what red looks like |
-| a white "both" marker | optional — `s` skips |
-| the purple of the disco ball | optional — `s` skips |
+| a white "both" marker | optional |
+| the purple of the disco ball | optional |
 
-`q` quits at any point. Clicks land on the phone, so pressing the drums really
-does press them — that's expected and harmless.
+You pick a target by **hovering over it and holding still** for about a second —
+no clicking, no keypresses. A progress bar fills as you hold; moving restarts
+it, so overshooting costs nothing. Optional steps ask yes/no in the terminal
+first. Ctrl-C stops at any point.
 
-Then it shows a **live readout** of what it sees. Watch it against the game: a
-blue note should read blue, a red note red, a pair both. Press `e` to start
-playing when it looks right, or `q` to bail and re-run.
+Then it shows a **live readout** for 25 seconds. Watch it against the game: a
+blue note should read blue, a red note red, a pair both. It then asks whether to
+start playing.
+
+### Why hovering, and not clicking or a hotkey
+
+Reading the global keyboard or mouse-button state on macOS needs the **Input
+Monitoring** permission, which is separate from Accessibility. When it's missing
+those calls don't fail — they silently report that nothing is pressed, so a
+hotkey prompt just sits there forever. Reading the *cursor position* needs no
+permission at all, so setup only ever asks where the pointer is.
+
+Hovering also avoids a side effect: a click inside the mirroring window is
+forwarded to the phone, so picking targets by clicking taps the game as you go.
 
 Re-run setup any time with `run --setup`. Do that whenever the mirroring window
 moves, since the coordinates are absolute.

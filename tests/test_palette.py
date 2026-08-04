@@ -188,3 +188,72 @@ def test_subsampling_does_not_change_the_verdict():
     fine = decide_taps(count_matches(region, pal, step=1), pal)
     coarse = decide_taps(count_matches(region, pal, step=3), pal)
     assert fine == coarse
+
+
+# --------------------------------------------------------------------------
+# hover-to-select
+#
+# Targets are picked by hovering, not clicking or pressing a key: reading the
+# cursor position needs no permission, while reading key or mouse-button state
+# needs macOS Input Monitoring and silently reports nothing when that is
+# missing.
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+def run_dwell(path, **kw):
+    """Feed a scripted cursor path through the dwell detector."""
+    from vocalbot.wizard import dwell
+
+    clock = FakeClock()
+    steps = iter(path)
+    last = [path[0]]
+
+    def pos():
+        try:
+            last[0] = next(steps)
+        except StopIteration:
+            pass
+        return last[0]
+
+    return dwell(pos, clock=clock, sleep=clock.sleep, **kw)
+
+
+def test_holding_still_locks_the_point():
+    point = (500, 400)
+    assert run_dwell([point] * 400, hold=1.0) == point
+
+
+def test_moving_restarts_the_hold():
+    """Overshooting a target must cost nothing but time."""
+    wander = [(100 + i * 40, 200) for i in range(30)]
+    settled = [(900, 200)] * 400
+    assert run_dwell(wander + settled, hold=1.0) == (900, 200)
+
+
+def test_small_wobble_still_counts_as_still():
+    """A hand resting on a trackpad is never perfectly motionless."""
+    jitter = [(500 + (i % 3), 400 - (i % 2)) for i in range(400)]
+    got = run_dwell(jitter, hold=1.0, radius=8)
+    assert got is not None and abs(got[0] - 500) <= 8
+
+
+def test_constant_movement_never_locks():
+    drift = [(100 + i * 20, 200) for i in range(500)]
+    assert run_dwell(drift, hold=1.0, timeout=5.0) is None
+
+
+def test_dwell_reports_progress():
+    seen = []
+    run_dwell([(300, 300)] * 400, hold=1.0, on_tick=lambda p, f: seen.append(f))
+    assert seen and seen[0] < seen[-1]
+    assert max(seen) <= 1.0
