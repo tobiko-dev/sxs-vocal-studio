@@ -12,8 +12,29 @@ Add, move, retune or disable zones with `vocalbot calibrate zones`.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import sys
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+
+
+def _known_only(cls, data: dict, label: str) -> dict:
+    """Drop settings the dataclass no longer has, and say so.
+
+    A config written by an older version can carry fields that have since been
+    renamed or removed. Passing those straight into the constructor raises
+    TypeError with nothing useful in it, which is a poor trade for settings that
+    are simply out of date - the sensible thing is to ignore them and carry on
+    with the current defaults.
+    """
+    known = {f.name for f in fields(cls)}
+    stale = sorted(set(data) - known)
+    if stale:
+        print(
+            f"note: ignoring settings from an older version in {label}: "
+            f"{', '.join(stale)}",
+            file=sys.stderr,
+        )
+    return {k: v for k, v in data.items() if k in known}
 
 # Reference screenshot the fractions below were measured on.
 REF_W, REF_H = 1206, 2622
@@ -346,16 +367,18 @@ class Config:
                 )
                 for s in pal.get("samples", [])
             ]
-            pal["bands"] = [
+            bands = [
                 HueBand(name=b["name"], ranges=[tuple(r) for r in b["ranges"]],
                         taps=tuple(b["taps"]))
                 for b in pal.get("bands", [])
-            ] or None
-            if pal["bands"] is None:
-                pal.pop("bands")
+            ]
+            if bands:
+                pal["bands"] = bands
+            else:
+                pal.pop("bands", None)  # older config: fall back to the defaults
             if "ignore_ranges" in pal:
                 pal["ignore_ranges"] = [tuple(r) for r in pal["ignore_ranges"]]
-            raw["palette"] = Palette(**pal)
+            raw["palette"] = Palette(**_known_only(Palette, pal, "palette"))
         if isinstance(raw.get("sample_rect"), list):
             raw["sample_rect"] = tuple(raw["sample_rect"])
         if isinstance(raw.get("drum_points"), dict):
@@ -374,4 +397,4 @@ class Config:
         for key in ("drum_red", "drum_blue", "tap_order", "window_rect"):
             if isinstance(raw.get(key), list):
                 raw[key] = tuple(raw[key])
-        return cls(**raw)
+        return cls(**_known_only(cls, raw, str(path)))
